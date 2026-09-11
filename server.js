@@ -34,12 +34,16 @@ function readDB(){
   try { return JSON.parse(fs.readFileSync(DB_FILE,'utf8')); }
   catch {
     const adminPassword = process.env.ADMIN_PASSWORD || '135790';
-    const db = {settings:{schoolName:'منصّة الدروس', autoWhatsApp:true}, classes:[], students:[], videos:[], games:[], results:[], admin:{id:'admin',username:process.env.ADMIN_USERNAME||'redaawad',passwordHash:hashPassword(adminPassword)}};
+    const db = {settings:{schoolName:'منصّة الدروس', autoWhatsApp:true}, classes:[], students:[], videos:[], games:[], results:[], activity:[], videoProgress:[], admin:{id:'admin',username:process.env.ADMIN_USERNAME||'redaawad',passwordHash:hashPassword(adminPassword)}};
     writeDB(db); return db;
   }
 }
 function writeDB(db){ fs.writeFileSync(DB_FILE, JSON.stringify(db,null,2), 'utf8'); }
 let db = readDB();
+db.activity = Array.isArray(db.activity) ? db.activity : [];
+db.videoProgress = Array.isArray(db.videoProgress) ? db.videoProgress : [];
+if (!Array.isArray(db.videos)) db.videos = [];
+writeDB(db);
 // ترقية تلقائية لنسخة قديمة كانت تستخدم admin/admin123، دون المساس بكلمة المرور إذا كان المعلم قد غيّرها.
 if (db.admin && db.admin.username === 'admin' && !db.admin.passwordChangedAt) {
   db.admin.username = process.env.ADMIN_USERNAME || 'redaawad';
@@ -75,6 +79,15 @@ function studentPublic(st, teacher=false){const base={id:st.id,name:st.name,user
 function classPublic(c){return {...c};}
 function gamePublic(g){return {id:g.id,title:g.title,classId:g.classId,description:g.description||'',filename:g.filename||''};}
 function resultPublic(r){return {...r};}
+function activityPublic(a){return {...a};}
+function videoProgressPublic(p){return {...p};}
+function addActivity({studentId,type,entityType='',entityId='',title='',details='',position=null,duration=null,watchedDelta=0,percent=null,metadata=null}){
+  const st=db.students.find(x=>x.id===studentId);const entry={id:uid('act'),studentId,studentName:st?.name||'طالب',type,entityType,entityId,title,details,position:position==null?null:Number(position),duration:duration==null?null:Number(duration),watchedDelta:Number(watchedDelta||0),percent:percent==null?null:Number(percent),metadata:metadata||null,createdAt:Date.now()};
+  db.activity.push(entry);
+  if(db.activity.length>10000) db.activity=db.activity.slice(-10000);
+  writeDB(db);
+  return entry;
+}
 
 async function handle(req,res){
   const url = new URL(req.url, `http://${req.headers.host||'localhost'}`);
@@ -100,6 +113,8 @@ async function handle(req,res){
     }
     if(!user) return json(res,401,{error:'بيانات الدخول غير صحيحة'});
     const token=crypto.randomBytes(32).toString('hex'); sessions.set(token,{...user,expires:Date.now()+8*60*60*1000});
+    if(user.role==='student') addActivity({studentId:user.id,type:'login',entityType:'session',title:'دخول الطالب',details:'تم تسجيل الدخول إلى حساب الطالب'});
+    if(user.role==='parent') addActivity({studentId:user.id,type:'parent_login',entityType:'session',title:'دخول ولي الأمر',details:'تم فتح حساب ولي الأمر'});
     return json(res,200,{token,user});
   }
   if(req.method==='POST' && pathname==='/api/logout'){
@@ -110,7 +125,7 @@ async function handle(req,res){
   }
   if(req.method==='POST' && pathname==='/api/admin/password'){if(!requireRole(req,res,['teacher']))return;const b=JSON.parse(await body(req)||'{}');if(!b.password||String(b.password).length<6)return json(res,400,{error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});db.admin.passwordHash=hashPassword(b.password);db.admin.passwordChangedAt=Date.now();writeDB(db);return json(res,200,{ok:true});}
   if(req.method==='GET' && pathname==='/api/teacher/dashboard'){
-    if(!requireRole(req,res,['teacher']))return; return json(res,200,{settings:db.settings,classes:db.classes.map(classPublic),students:db.students.map(x=>studentPublic(x,true)),videos:(db.videos||[]),games:db.games.map(gamePublic),results:db.results.map(resultPublic).reverse()});
+    if(!requireRole(req,res,['teacher']))return; return json(res,200,{settings:db.settings,classes:db.classes.map(classPublic),students:db.students.map(x=>studentPublic(x,true)),videos:(db.videos||[]),games:db.games.map(gamePublic),results:db.results.map(resultPublic).reverse(),activity:db.activity.map(activityPublic).reverse(),videoProgress:db.videoProgress.map(videoProgressPublic)});
   }
   if(req.method==='POST' && pathname==='/api/classes'){
     if(!requireRole(req,res,['teacher']))return; const b=JSON.parse(await body(req)||'{}'); if(!b.name)return json(res,400,{error:'اسم الصف مطلوب'}); const c={id:uid('class'),name:String(b.name).trim(),subject:String(b.subject||'').trim(),createdAt:Date.now()}; db.classes.push(c);writeDB(db);return json(res,201,{class:c});
@@ -149,14 +164,33 @@ async function handle(req,res){
   if(req.method==='DELETE' && pathname.startsWith('/api/games/')){
     if(!requireRole(req,res,['teacher']))return;const id=path.basename(pathname);const g=db.games.find(x=>x.id===id);if(g){try{fs.unlinkSync(path.join(GAMES_DIR,g.filename))}catch{}}db.games=db.games.filter(x=>x.id!==id);writeDB(db);return json(res,200,{ok:true});
   }
+  if(req.method==='POST' && pathname==='/api/activity'){
+    const a=requireRole(req,res,['student']);if(!a)return;const b=JSON.parse(await body(req)||'{}');
+    const allowed=['login','logout','video_open','video_play','video_pause','video_progress','video_seek','video_complete','game_open','game_result','page_view'];
+    const type=String(b.type||'');if(!allowed.includes(type))return json(res,400,{error:'نوع النشاط غير مدعوم'});
+    let entity=null;if(b.entityType==='video')entity=db.videos.find(v=>v.id===b.entityId);if(b.entityType==='game')entity=db.games.find(g=>g.id===b.entityId);
+    const st=db.students.find(x=>x.id===a.id);if(!st)return json(res,404,{error:'الطالب غير موجود'});
+    if(entity && entity.classId!==st.classId)return json(res,403,{error:'العنصر غير متاح لهذا الطالب'});
+    const item=addActivity({studentId:a.id,type,entityType:String(b.entityType||''),entityId:String(b.entityId||''),title:String(b.title||entity?.title||''),details:String(b.details||''),position:b.position,duration:b.duration,watchedDelta:b.watchedDelta,percent:b.percent,metadata:b.metadata});
+    return json(res,201,{activity:item});
+  }
+  if(req.method==='POST' && pathname.match(/^\/api\/videos\/[^/]+\/progress$/)){
+    const a=requireRole(req,res,['student']);if(!a)return;const videoId=pathname.split('/')[3];
+    const v=db.videos.find(x=>x.id===videoId), st=db.students.find(x=>x.id===a.id);if(!v||!st)return json(res,404,{error:'الفيديو أو الطالب غير موجود'});if(v.classId!==st.classId||!st.permissions?.video)return json(res,403,{error:'الفيديو غير متاح لهذا الطالب'});
+    const b=JSON.parse(await body(req)||'{}');const event=String(b.event||'progress');const position=Math.max(0,Number(b.position||0));const duration=Math.max(0,Number(b.duration||v.durationSec||0));const delta=Math.max(0,Math.min(10,Number(b.watchedDelta||0)));const completed=Boolean(b.completed)||(duration>0&&position>=duration*0.95);
+    let p=db.videoProgress.find(x=>x.studentId===st.id&&x.videoId===v.id);if(!p){p={id:uid('vp'),studentId:st.id,videoId:v.id,videoTitle:v.title,watchedSeconds:0,maxPosition:0,durationSeconds:duration||null,percent:0,openCount:0,completed:false,firstAt:Date.now(),lastPosition:0,lastAt:Date.now()};db.videoProgress.push(p)}
+    p.videoTitle=v.title;if(duration){p.durationSeconds=duration;v.durationSec=duration;}if(event==='open')p.openCount=Number(p.openCount||0)+1;p.watchedSeconds=Math.min((p.durationSeconds||Infinity),Number(p.watchedSeconds||0)+delta);p.maxPosition=Math.max(Number(p.maxPosition||0),position);p.lastPosition=position;p.lastAt=Date.now();p.percent=p.durationSeconds?Math.min(100,Math.round(Number(p.watchedSeconds||0)/p.durationSeconds*100)):0;if(event==='complete'||(p.durationSeconds&&p.watchedSeconds>=p.durationSeconds*0.95))p.completed=true;writeDB(db);
+    if(['open','play','pause','seek','complete'].includes(event))addActivity({studentId:st.id,type:'video_'+event,entityType:'video',entityId:v.id,title:v.title,details:event==='complete'?'اكتمل الفيديو':event==='seek'?'انتقال داخل الفيديو':event==='play'?'بدأ التشغيل':event==='pause'?'تم إيقاف الفيديو':'فتح الفيديو',position,duration,watchedDelta:delta,percent:p.percent});
+    return json(res,200,{progress:videoProgressPublic(p)});
+  }
   if(req.method==='GET' && pathname==='/api/student/me'){
-    const a=requireRole(req,res,['student']);if(!a)return;const st=db.students.find(x=>x.id===a.id);if(!st)return json(res,404,{error:'الطالب غير موجود'});const games=db.games.filter(g=>g.classId===st.classId&&st.permissions?.game);const videos=(db.videos||[]).filter(v=>v.classId===st.classId&&st.permissions?.video);const results=db.results.filter(r=>r.studentId===st.id).reverse();return json(res,200,{student:studentPublic(st),class:classPublic(db.classes.find(c=>c.id===st.classId)||{name:'بدون صف'}),games:games.map(gamePublic),videos,results});
+    const a=requireRole(req,res,['student']);if(!a)return;const st=db.students.find(x=>x.id===a.id);if(!st)return json(res,404,{error:'الطالب غير موجود'});const games=db.games.filter(g=>g.classId===st.classId&&st.permissions?.game);const videos=(db.videos||[]).filter(v=>v.classId===st.classId&&st.permissions?.video);const results=db.results.filter(r=>r.studentId===st.id).reverse();return json(res,200,{student:studentPublic(st),class:classPublic(db.classes.find(c=>c.id===st.classId)||{name:'بدون صف'}),games:games.map(gamePublic),videos,results,activity:db.activity.filter(a=>a.studentId===st.id).map(activityPublic).reverse(),videoProgress:db.videoProgress.filter(p=>p.studentId===st.id).map(videoProgressPublic)});
   }
   if(req.method==='GET' && pathname==='/api/parent/me'){
-    const a=requireRole(req,res,['parent']);if(!a)return;const st=db.students.find(x=>x.id===a.id);const games=db.games.filter(g=>g.classId===st.classId);const results=db.results.filter(r=>r.studentId===st.id).reverse();return json(res,200,{student:studentPublic(st),class:classPublic(db.classes.find(c=>c.id===st.classId)||{name:'بدون صف'}),games:games.map(gamePublic),results});
+    const a=requireRole(req,res,['parent']);if(!a)return;const st=db.students.find(x=>x.id===a.id);const games=db.games.filter(g=>g.classId===st.classId);const results=db.results.filter(r=>r.studentId===st.id).reverse();return json(res,200,{student:studentPublic(st),class:classPublic(db.classes.find(c=>c.id===st.classId)||{name:'بدون صف'}),games:games.map(gamePublic),results,activity:db.activity.filter(a=>a.studentId===st.id).map(activityPublic).reverse(),videoProgress:db.videoProgress.filter(p=>p.studentId===st.id).map(videoProgressPublic)});
   }
   if(req.method==='POST' && pathname==='/api/results'){
-    const a=requireRole(req,res,['student','teacher']);if(!a)return;const b=JSON.parse(await body(req)||'{}');const stId=a.role==='student'?a.id:b.studentId;const st=db.students.find(x=>x.id===stId);const g=db.games.find(x=>x.id===b.gameId);if(!st||!g)return json(res,400,{error:'الطالب أو اللعبة غير موجود'});let score=Number(b.score),total=Number(b.total);if(!Number.isFinite(score)||!Number.isFinite(total)||total<=0)return json(res,400,{error:'النتيجة غير صالحة'});score=Math.max(0,Math.min(total,score));const pct=Math.round(score/total*100);const r={id:uid('result'),studentId:st.id,studentName:st.name,gameId:g.id,gameTitle:g.title,score,total,percentage:pct,parentPhone:st.parentPhone,parentName:st.parentName,createdAt:Date.now(),notified:false};db.results.push(r);writeDB(db);const notify=await sendWhatsAppIfConfigured(st,r);return json(res,201,{result:r,whatsapp:notify});
+    const a=requireRole(req,res,['student','teacher']);if(!a)return;const b=JSON.parse(await body(req)||'{}');const stId=a.role==='student'?a.id:b.studentId;const st=db.students.find(x=>x.id===stId);const g=db.games.find(x=>x.id===b.gameId);if(!st||!g)return json(res,400,{error:'الطالب أو اللعبة غير موجود'});let score=Number(b.score),total=Number(b.total);if(!Number.isFinite(score)||!Number.isFinite(total)||total<=0)return json(res,400,{error:'النتيجة غير صالحة'});score=Math.max(0,Math.min(total,score));const pct=Math.round(score/total*100);const r={id:uid('result'),studentId:st.id,studentName:st.name,gameId:g.id,gameTitle:g.title,score,total,percentage:pct,parentPhone:st.parentPhone,parentName:st.parentName,createdAt:Date.now(),notified:false};db.results.push(r);writeDB(db);addActivity({studentId:st.id,type:'game_result',entityType:'game',entityId:g.id,title:g.title,details:`النتيجة ${score}/${total} — ${pct}%`,percent:pct});const notify=await sendWhatsAppIfConfigured(st,r);return json(res,201,{result:r,whatsapp:notify});
   }
   if(req.method==='POST' && pathname.startsWith('/api/results/') && pathname.endsWith('/notify')){
     if(!requireRole(req,res,['teacher','parent']))return;const id=pathname.split('/')[3];const r=db.results.find(x=>x.id===id);if(!r)return json(res,404,{error:'النتيجة غير موجودة'});const st=db.students.find(x=>x.id===r.studentId);const out=await sendWhatsAppIfConfigured(st,r);return json(res,200,{whatsapp:out});
