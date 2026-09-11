@@ -32,7 +32,7 @@ function cleanPhone(v) { return String(v||'').replace(/[^0-9]/g,'').replace(/^00
 function readDB(){
   try { return JSON.parse(fs.readFileSync(DB_FILE,'utf8')); }
   catch {
-    const adminPassword = process.env.ADMIN_PASSWORD || '135790          ';
+    const adminPassword = process.env.ADMIN_PASSWORD || '135790';
     const db = {settings:{schoolName:'منصّة الدروس', autoWhatsApp:true}, classes:[], students:[], videos:[], games:[], results:[], admin:{id:'admin',username:process.env.ADMIN_USERNAME||'admin',passwordHash:hashPassword(adminPassword)}};
     writeDB(db); return db;
   }
