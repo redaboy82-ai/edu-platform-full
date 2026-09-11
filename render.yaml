@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: edu-platform
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: GAMES_DIR
+        value: /var/data/games
+    disk:
+      name: edu-platform-data
+      mountPath: /var/data
+      sizeGB: 1

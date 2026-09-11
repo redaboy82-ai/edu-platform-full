@@ -6,8 +6,9 @@ const { URL } = require('url');
 
 const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, 'data');
-const GAMES_DIR = path.join(ROOT, 'games');
+const STORAGE_ROOT = process.env.STORAGE_DIR ? path.resolve(process.env.STORAGE_DIR) : ROOT;
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(STORAGE_ROOT, 'data');
+const GAMES_DIR = process.env.GAMES_DIR ? path.resolve(process.env.GAMES_DIR) : path.join(STORAGE_ROOT, 'games');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 fs.mkdirSync(DATA_DIR, {recursive:true});
@@ -33,12 +34,18 @@ function readDB(){
   try { return JSON.parse(fs.readFileSync(DB_FILE,'utf8')); }
   catch {
     const adminPassword = process.env.ADMIN_PASSWORD || '135790';
-    const db = {settings:{schoolName:'منصّة الدروس', autoWhatsApp:true}, classes:[], students:[], videos:[], games:[], results:[], admin:{id:'admin',username:process.env.ADMIN_USERNAME||'admin',passwordHash:hashPassword(adminPassword)}};
+    const db = {settings:{schoolName:'منصّة الدروس', autoWhatsApp:true}, classes:[], students:[], videos:[], games:[], results:[], admin:{id:'admin',username:process.env.ADMIN_USERNAME||'redaawad',passwordHash:hashPassword(adminPassword)}};
     writeDB(db); return db;
   }
 }
 function writeDB(db){ fs.writeFileSync(DB_FILE, JSON.stringify(db,null,2), 'utf8'); }
 let db = readDB();
+// ترقية تلقائية لنسخة قديمة كانت تستخدم admin/admin123، دون المساس بكلمة المرور إذا كان المعلم قد غيّرها.
+if (db.admin && db.admin.username === 'admin' && !db.admin.passwordChangedAt) {
+  db.admin.username = process.env.ADMIN_USERNAME || 'redaawad';
+  db.admin.passwordHash = hashPassword(process.env.ADMIN_PASSWORD || '135790');
+  writeDB(db);
+}
 
 function json(res,status,obj){
   const body = JSON.stringify(obj);
@@ -85,11 +92,11 @@ async function handle(req,res){
     const b=JSON.parse(await body(req)||'{}'); const role=b.role; const username=String(b.username||'').trim(); const password=String(b.password||'');
     let user=null;
     if(role==='teacher'){
-      if(username===db.admin.username && verifyPassword(password,db.admin.passwordHash)) user={id:db.admin.id,role:'teacher',name:'المعلم / الإدارة'};
+      if(username===db.admin.username && verifyPassword(password,db.admin.passwordHash)) user={id:db.admin.id,role:'teacher',name:'المعلم / الإدارة',username:db.admin.username};
     } else if(role==='student'){
-      user=db.students.find(s=>s.username===username && verifyPassword(password,s.passwordHash)); if(user) user={id:user.id,role:'student',name:user.name};
+      user=db.students.find(s=>s.username===username && verifyPassword(password,s.passwordHash)); if(user) user={id:user.id,role:'student',name:user.name,username:user.username};
     } else if(role==='parent'){
-      user=db.students.find(s=>s.parentCode===username && verifyPassword(password,s.parentPasswordHash)); if(user) user={id:user.id,role:'parent',name:safeParentName(user)};
+      user=db.students.find(s=>s.parentCode===username && verifyPassword(password,s.parentPasswordHash)); if(user) user={id:user.id,role:'parent',name:safeParentName(user),username:user.parentCode};
     }
     if(!user) return json(res,401,{error:'بيانات الدخول غير صحيحة'});
     const token=crypto.randomBytes(32).toString('hex'); sessions.set(token,{...user,expires:Date.now()+8*60*60*1000});
