@@ -42,6 +42,7 @@ function writeDB(db){ fs.writeFileSync(DB_FILE, JSON.stringify(db,null,2), 'utf8
 let db = readDB();
 db.activity = Array.isArray(db.activity) ? db.activity : [];
 db.videoProgress = Array.isArray(db.videoProgress) ? db.videoProgress : [];
+db.activity = db.activity.filter(a => !['login','logout','page_view','parent_login'].includes(a.type));
 if (!Array.isArray(db.videos)) db.videos = [];
 writeDB(db);
 // ترقية تلقائية لنسخة قديمة كانت تستخدم admin/admin123، دون المساس بكلمة المرور إذا كان المعلم قد غيّرها.
@@ -113,8 +114,6 @@ async function handle(req,res){
     }
     if(!user) return json(res,401,{error:'بيانات الدخول غير صحيحة'});
     const token=crypto.randomBytes(32).toString('hex'); sessions.set(token,{...user,expires:Date.now()+8*60*60*1000});
-    if(user.role==='student') addActivity({studentId:user.id,type:'login',entityType:'session',title:'دخول الطالب',details:'تم تسجيل الدخول إلى حساب الطالب'});
-    if(user.role==='parent') addActivity({studentId:user.id,type:'parent_login',entityType:'session',title:'دخول ولي الأمر',details:'تم فتح حساب ولي الأمر'});
     return json(res,200,{token,user});
   }
   if(req.method==='POST' && pathname==='/api/logout'){
@@ -145,6 +144,13 @@ async function handle(req,res){
   if(req.method==='PUT' && pathname.startsWith('/api/students/')){
     if(!requireRole(req,res,['teacher']))return; const id=path.basename(pathname);const st=db.students.find(x=>x.id===id);if(!st)return json(res,404,{error:'الطالب غير موجود'});const b=JSON.parse(await body(req)||'{}');Object.assign(st,{name:String(b.name??st.name).trim(),classId:b.classId??st.classId,phone:cleanPhone(b.phone??st.phone),parentName:String(b.parentName??st.parentName).trim(),parentPhone:cleanPhone(b.parentPhone??st.parentPhone)});if(b.password){st.passwordHash=hashPassword(b.password);st.initialPassword=b.password;}if(b.parentPassword){st.parentPasswordHash=hashPassword(b.parentPassword);st.initialParentPassword=b.parentPassword;}writeDB(db);return json(res,200,{student:studentPublic(st)});
   }
+  if(req.method==='POST' && pathname.startsWith('/api/students/') && pathname.endsWith('/progress-report')){
+    if(!requireRole(req,res,['teacher']))return;
+    const id=pathname.split('/')[3]; const st=db.students.find(x=>x.id===id);
+    if(!st)return json(res,404,{error:'الطالب غير موجود'});
+    const out=await sendProgressReportIfConfigured(st);
+    return json(res,200,{whatsapp:out});
+  }
   if(req.method==='DELETE' && pathname.startsWith('/api/students/')){
     if(!requireRole(req,res,['teacher']))return; const id=path.basename(pathname);db.students=db.students.filter(x=>x.id!==id);db.results=db.results.filter(x=>x.studentId!==id);writeDB(db);return json(res,200,{ok:true});
   }
@@ -166,7 +172,7 @@ async function handle(req,res){
   }
   if(req.method==='POST' && pathname==='/api/activity'){
     const a=requireRole(req,res,['student']);if(!a)return;const b=JSON.parse(await body(req)||'{}');
-    const allowed=['login','logout','video_open','video_play','video_pause','video_progress','video_seek','video_complete','game_open','game_result','page_view'];
+    const allowed=['video_open','video_play','video_pause','video_progress','video_seek','video_complete','game_open','game_result'];
     const type=String(b.type||'');if(!allowed.includes(type))return json(res,400,{error:'نوع النشاط غير مدعوم'});
     let entity=null;if(b.entityType==='video')entity=db.videos.find(v=>v.id===b.entityId);if(b.entityType==='game')entity=db.games.find(g=>g.id===b.entityId);
     const st=db.students.find(x=>x.id===a.id);if(!st)return json(res,404,{error:'الطالب غير موجود'});
@@ -177,9 +183,9 @@ async function handle(req,res){
   if(req.method==='POST' && pathname.match(/^\/api\/videos\/[^/]+\/progress$/)){
     const a=requireRole(req,res,['student']);if(!a)return;const videoId=pathname.split('/')[3];
     const v=db.videos.find(x=>x.id===videoId), st=db.students.find(x=>x.id===a.id);if(!v||!st)return json(res,404,{error:'الفيديو أو الطالب غير موجود'});if(v.classId!==st.classId||!st.permissions?.video)return json(res,403,{error:'الفيديو غير متاح لهذا الطالب'});
-    const b=JSON.parse(await body(req)||'{}');const event=String(b.event||'progress');const position=Math.max(0,Number(b.position||0));const duration=Math.max(0,Number(b.duration||v.durationSec||0));const delta=Math.max(0,Math.min(10,Number(b.watchedDelta||0)));const completed=Boolean(b.completed)||(duration>0&&position>=duration*0.95);
+    const b=JSON.parse(await body(req)||'{}');const event=String(b.event||'progress');const position=Math.max(0,Number(b.position||0));const duration=Math.max(0,Number(b.duration||v.durationSec||0));const delta=Math.max(0,Math.min(10,Number(b.watchedDelta||0)));
     let p=db.videoProgress.find(x=>x.studentId===st.id&&x.videoId===v.id);if(!p){p={id:uid('vp'),studentId:st.id,videoId:v.id,videoTitle:v.title,watchedSeconds:0,maxPosition:0,durationSeconds:duration||null,percent:0,openCount:0,completed:false,firstAt:Date.now(),lastPosition:0,lastAt:Date.now()};db.videoProgress.push(p)}
-    p.videoTitle=v.title;if(duration){p.durationSeconds=duration;v.durationSec=duration;}if(event==='open')p.openCount=Number(p.openCount||0)+1;p.watchedSeconds=Math.min((p.durationSeconds||Infinity),Number(p.watchedSeconds||0)+delta);p.maxPosition=Math.max(Number(p.maxPosition||0),position);p.lastPosition=position;p.lastAt=Date.now();p.percent=p.durationSeconds?Math.min(100,Math.round(Number(p.watchedSeconds||0)/p.durationSeconds*100)):0;if(event==='complete'||(p.durationSeconds&&p.watchedSeconds>=p.durationSeconds*0.95))p.completed=true;writeDB(db);
+    p.videoTitle=v.title;if(duration){p.durationSeconds=duration;v.durationSec=duration;}if(event==='open')p.openCount=Number(p.openCount||0)+1;p.watchedSeconds=Math.min((p.durationSeconds||Infinity),Number(p.watchedSeconds||0)+delta);p.maxPosition=Math.max(Number(p.maxPosition||0),position);p.lastPosition=position;p.lastAt=Date.now();p.percent=p.durationSeconds?Math.min(100,Math.round(Number(p.watchedSeconds||0)/p.durationSeconds*100)):0;if((p.durationSeconds&&p.watchedSeconds>=p.durationSeconds*0.95)||(event==='complete'&&p.durationSeconds&&p.watchedSeconds>=p.durationSeconds*0.95))p.completed=true;writeDB(db);
     if(['open','play','pause','seek','complete'].includes(event))addActivity({studentId:st.id,type:'video_'+event,entityType:'video',entityId:v.id,title:v.title,details:event==='complete'?'اكتمل الفيديو':event==='seek'?'انتقال داخل الفيديو':event==='play'?'بدأ التشغيل':event==='pause'?'تم إيقاف الفيديو':'فتح الفيديو',position,duration,watchedDelta:delta,percent:p.percent});
     return json(res,200,{progress:videoProgressPublic(p)});
   }
@@ -207,6 +213,35 @@ async function handle(req,res){
   return json(res,404,{error:'المسار غير موجود'});
 }
 function safeParentName(st){return st.parentName||'ولي الأمر';}
+async function sendProgressReportIfConfigured(st){
+  const phone=cleanPhone(st?.parentPhone);
+  if(!phone)return {mode:'manual',url:'',message:'لا يوجد رقم ولي أمر محفوظ لهذا الطالب.'};
+  const cls=db.classes.find(c=>c.id===st.classId);
+  const progress=db.videoProgress.filter(p=>p.studentId===st.id);
+  const activities=db.activity.filter(a=>a.studentId===st.id);
+  const results=db.results.filter(r=>r.studentId===st.id);
+  const gamesOpened={};
+  activities.filter(a=>a.type==='game_open').forEach(a=>{gamesOpened[a.entityId]={title:a.title,at:a.createdAt};});
+  const latest={};
+  results.forEach(r=>{if(!latest[r.gameId]||r.createdAt>latest[r.gameId].createdAt)latest[r.gameId]=r;});
+  const videoLines=progress.length?progress.map(p=>`- ${p.videoTitle}: ${formatReportSec(p.watchedSeconds)} من ${formatReportSec(p.durationSeconds)} (${p.percent||0}%) ${p.completed?'مكتمل':'غير مكتمل'}`).join('\\n'):'- لا توجد مشاهدة فيديو مسجلة';
+  const gameIds=Object.keys(gamesOpened);
+  const gameLines=gameIds.length?gameIds.map(gid=>{const o=gamesOpened[gid],r=latest[gid];return r?`- ${r.gameTitle}: ${r.score}/${r.total} (${r.percentage}%)`:`- ${o.title||'لعبة'}: دخل الطالب اللعبة ولم تُسجل نتيجة بعد`;}).join('\\n'):'- لا توجد ألعاب تم دخولها';
+  const msg=`السلام عليكم،\\nتقرير متابعة الطالب: ${st.name}\\nالصف: ${cls?.name||'—'}\\n\\nالفيديوهات:\\n${videoLines}\\n\\nالألعاب التعليمية:\\n${gameLines}\\n\\nعدد الأنشطة التعليمية المسجلة: ${activities.length}\\nنرجو متابعة الطالب وتشجيعه على إكمال الدروس والألعاب.`;
+  const manual=`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
+  const token=process.env.WHATSAPP_TOKEN,phoneNumberId=process.env.WHATSAPP_PHONE_NUMBER_ID,apiVersion=process.env.WHATSAPP_API_VERSION||'v23.0';
+  if(!token||!phoneNumberId)return {mode:'manual',url:manual,message:'تم تجهيز تقرير واتساب. للإرسال الآلي ضع بيانات WhatsApp Cloud API.'};
+  try{
+    const url=`https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`;
+    const payload={messaging_product:'whatsapp',to:phone,type:'text',text:{body:msg}};
+    const resp=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const data=await resp.json();
+    if(!resp.ok)return {mode:'manual',url:manual,message:'تعذر الإرسال الآلي للتقرير، استخدم الرابط الجاهز.',error:data};
+    return {mode:'automatic',message:'تم إرسال تقرير المتابعة إلى ولي الأمر تلقائياً.'};
+  }catch(e){return {mode:'manual',url:manual,message:'تعذر الاتصال بخدمة واتساب، استخدم الرابط الجاهز.',error:e.message};}
+}
+function formatReportSec(sec){sec=Number(sec)||0;if(sec<60)return `00:${String(Math.floor(sec)).padStart(2,'0')}`;const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=Math.floor(sec%60);return (h?String(h).padStart(2,'0')+':':'')+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')}
+
 async function sendWhatsAppIfConfigured(st,r){
   const msg=`السلام عليكم،\nتم الانتهاء من اللعبة التعليمية "${r.gameTitle}" للطالب ${r.studentName}.\nالدرجة: ${r.score} من ${r.total}\nالنسبة: ${r.percentage}%\nمع تمنياتنا بالتوفيق.`;
   const phone=cleanPhone(st?.parentPhone);
