@@ -3,41 +3,20 @@
     "schoolName": "منصّة الدروس",
     "autoWhatsApp": true
   },
-  "classes": [
-    {
-      "id": "class_mtx621ik_d4cbcf0a",
-      "name": "الصف الرابع الابتدائى",
-      "subject": "علوم",
-      "createdAt": 1789143854636
-    }
-  ],
-  "students": [
-    {
-      "id": "student_mtx66anv_a9f0f61b",
-      "name": "رضا احمد عوض",
-      "classId": "class_mtx621ik_d4cbcf0a",
-      "phone": "",
-      "parentName": "احمد عوض",
-      "parentPhone": "201093559477",
-      "username": "student_i4va1",
-      "passwordHash": "27b1655cc6b97c5e86eab3bf28dd3013:d37fab76d6eee9352172e2a133cbe33179830003a5e251fdd39040392dfa39186d2338c86a4c0028139844dacd125461a8345944f2f458e8294b33778f88117f",
-      "parentCode": "P-T25WC",
-      "parentPasswordHash": "3686cf0633d9587951513c663733e9e4:4a1482f80896ff648c6b5d220a4059a48a7facdabf963db246921183a7fb4bd13b90c15c07daabf458523849c35ad8b559cb712cc8a5dadb2ace13100f25c5f7",
-      "initialPassword": "d57w92",
-      "initialParentPassword": "5j5w4a",
-      "permissions": {
-        "video": true,
-        "game": true
-      },
-      "createdAt": 1789144053232
-    }
-  ],
+  "classes": [],
+  "students": [],
   "videos": [],
   "games": [],
+  "electronicTests": [],
   "results": [],
+  "videoProgress": [],
+  "activities": [],
+  "testRetakes": [],
   "admin": {
     "id": "admin",
-    "username": "admin",
-    "passwordHash": "02d6558a8b7fc91f1394a786aba1aff4:f3199d58dbe32f862b1970b876e5575f5dba0b6179abdb6de3e924fcdcf028d8b03f3fbd398702da2ef0dad67af9c8ba7f8221dd39b5185c93a9cac0a05156f0"
-  }
+    "username": "redaawad",
+    "passwordHash": "2800ae212e00e749d4810e9740b0361e:729ca8d361ad298e7ba9861b255e64ab319ae57440dab637b12a44b93ad25b52db91b832805e7daf211595fb51606c79bd08c5277b085967a18e4aa1f04c6bb6",
+    "recoveryPhone": "201093559477"
+  },
+  "legacyElectronicTests": []
 }
