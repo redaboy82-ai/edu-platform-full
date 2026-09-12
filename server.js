@@ -45,11 +45,12 @@ function normalizeTestUrl(raw) {
     return u;
   } catch { return ''; }
 }
+const DEFAULT_RECOVERY_PHONE = cleanPhone(process.env.ADMIN_RECOVERY_PHONE || '00201093559477');
 function readDB(){
   try { return JSON.parse(fs.readFileSync(DB_FILE,'utf8')); }
   catch {
     const adminPassword = process.env.ADMIN_PASSWORD || '135790';
-    const db = {settings:{schoolName:'منصّة الدروس', autoWhatsApp:true}, classes:[], students:[], videos:[], games:[], electronicTests:[], results:[], videoProgress:[], activities:[], admin:{id:'admin',username:process.env.ADMIN_USERNAME||'redaawad',passwordHash:hashPassword(adminPassword)}};
+    const db = {settings:{schoolName:'منصّة الدروس', autoWhatsApp:true}, classes:[], students:[], videos:[], games:[], electronicTests:[], results:[], videoProgress:[], activities:[], admin:{id:'admin',username:process.env.ADMIN_USERNAME||'redaawad',passwordHash:hashPassword(adminPassword),recoveryPhone:DEFAULT_RECOVERY_PHONE}};
     writeDB(db); return db;
   }
 }
@@ -57,6 +58,7 @@ function writeDB(db){ fs.writeFileSync(DB_FILE, JSON.stringify(db,null,2), 'utf8
 let db = readDB();
 // Migrate the original demo credentials to the requested teacher account when still untouched.
 if(db.admin && db.admin.username==='admin' && !db.admin.passwordChangedAt){ db.admin.username=process.env.ADMIN_USERNAME||'redaawad'; db.admin.passwordHash=hashPassword(process.env.ADMIN_PASSWORD||'135790'); writeDB(db); }
+if(db.admin && !db.admin.recoveryPhone){ db.admin.recoveryPhone=DEFAULT_RECOVERY_PHONE; writeDB(db); }
 db.electronicTests=Array.isArray(db.electronicTests)?db.electronicTests:[];
 db.videoProgress=Array.isArray(db.videoProgress)?db.videoProgress:[];
 db.activities=Array.isArray(db.activities)?db.activities:[];
@@ -138,12 +140,59 @@ async function handle(req,res){
   if(req.method==='POST' && pathname==='/api/logout'){
     const token=(req.headers.authorization||'').replace(/^Bearer\s+/i,''); if(token)sessions.delete(token); return json(res,200,{ok:true});
   }
+  if(req.method==='POST' && pathname==='/api/admin/forgot'){
+    const now=Date.now();
+    if(db.admin.resetCode && db.admin.resetCode.lastSentAt && now-db.admin.resetCode.lastSentAt<60*1000) return json(res,429,{error:'انتظر دقيقة قبل طلب رمز جديد'});
+    if(!db.admin.recoveryPhone) return json(res,400,{error:'لا يوجد رقم استعادة مسجّل لهذا الحساب. تواصل مع من يدير الخادم.'});
+    const code=String(Math.floor(100000+Math.random()*900000));
+    db.admin.resetCode={hash:hashPassword(code),expires:now+15*60*1000,attempts:0,lastSentAt:now}; writeDB(db);
+    const msg=`رمز استعادة الدخول لحساب المعلم في منصة الدروس: ${code}\nصالح لمدة 15 دقيقة. إذا لم تطلب هذا الرمز، تجاهل الرسالة.`;
+    const out=await sendWhatsAppRaw(db.admin.recoveryPhone,msg);
+    if(out.mode!=='automatic'){
+      // No WhatsApp Cloud API configured: don't leave a code nobody can receive automatically.
+      db.admin.resetCode=null; writeDB(db);
+      return json(res,200,{ok:true,mode:'unavailable',message:'الإرسال الآلي عبر واتساب غير مفعّل على هذا الخادم (يتطلب ضبط WHATSAPP_TOKEN و WHATSAPP_PHONE_NUMBER_ID). استخدم سكربت الطوارئ reset-admin.js من جهاز الخادم لإعادة ضبط بيانات الدخول.'});
+    }
+    return json(res,200,{ok:true,mode:'automatic',message:'تم إرسال رمز الاستعادة عبر واتساب إلى الرقم المسجّل.'});
+  }
+  if(req.method==='POST' && pathname==='/api/admin/reset'){
+    const b=JSON.parse(await body(req)||'{}');
+    const rc=db.admin.resetCode;
+    if(!rc || !rc.expires || rc.expires<Date.now()) return json(res,400,{error:'الرمز غير صالح أو منتهي، اطلب رمزًا جديدًا'});
+    if(rc.attempts>=5){ db.admin.resetCode=null; writeDB(db); return json(res,400,{error:'محاولات كثيرة فاشلة، اطلب رمزًا جديدًا'}); }
+    if(!b.code || !verifyPassword(String(b.code).trim(),rc.hash)){ rc.attempts=(rc.attempts||0)+1; writeDB(db); return json(res,400,{error:'الرمز غير صحيح'}); }
+    const newPassword=String(b.password||''); if(!newPassword||newPassword.length<6) return json(res,400,{error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});
+    let newUsername=String(b.username||'').trim()||db.admin.username;
+    if(newUsername.length<3||/\s/.test(newUsername)) return json(res,400,{error:'اسم المستخدم يجب أن يكون 3 أحرف على الأقل وبدون مسافات'});
+    db.admin.username=newUsername; db.admin.passwordHash=hashPassword(newPassword); db.admin.passwordChangedAt=Date.now(); db.admin.usernameChangedAt=Date.now(); db.admin.resetCode=null;
+    writeDB(db);
+    return json(res,200,{ok:true,username:newUsername});
+  }
   if(req.method==='GET' && pathname==='/api/me'){
     const a=auth(req); if(!a)return json(res,401,{error:'انتهت الجلسة'}); return json(res,200,{user:a});
   }
-  if(req.method==='POST' && pathname==='/api/admin/password'){if(!requireRole(req,res,['teacher']))return;const b=JSON.parse(await body(req)||'{}');if(!b.password||String(b.password).length<6)return json(res,400,{error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});db.admin.passwordHash=hashPassword(b.password);db.admin.passwordChangedAt=Date.now();writeDB(db);return json(res,200,{ok:true});}
+  if(req.method==='POST' && pathname==='/api/admin/password'){if(!requireRole(req,res,['teacher']))return;const b=JSON.parse(await body(req)||'{}');if(!b.password||String(b.password).length<6)return json(res,400,{error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});if(!b.currentPassword||!verifyPassword(b.currentPassword,db.admin.passwordHash))return json(res,400,{error:'كلمة المرور الحالية غير صحيحة'});db.admin.passwordHash=hashPassword(b.password);db.admin.passwordChangedAt=Date.now();writeDB(db);return json(res,200,{ok:true});}
+  if(req.method==='POST' && pathname==='/api/admin/username'){
+    if(!requireRole(req,res,['teacher']))return;
+    const b=JSON.parse(await body(req)||'{}');
+    const newUsername=String(b.username||'').trim();
+    if(!newUsername||newUsername.length<3) return json(res,400,{error:'اسم المستخدم يجب أن يكون 3 أحرف على الأقل'});
+    if(/\s/.test(newUsername)) return json(res,400,{error:'اسم المستخدم يجب ألا يحتوي على مسافات'});
+    if(!b.currentPassword||!verifyPassword(b.currentPassword,db.admin.passwordHash)) return json(res,400,{error:'كلمة المرور الحالية غير صحيحة'});
+    db.admin.username=newUsername; db.admin.usernameChangedAt=Date.now(); writeDB(db);
+    return json(res,200,{ok:true,username:newUsername});
+  }
+  if(req.method==='POST' && pathname==='/api/admin/recovery-phone'){
+    if(!requireRole(req,res,['teacher']))return;
+    const b=JSON.parse(await body(req)||'{}');
+    const phone=cleanPhone(b.phone);
+    if(!phone||phone.length<8) return json(res,400,{error:'رقم الهاتف غير صحيح'});
+    if(!b.currentPassword||!verifyPassword(b.currentPassword,db.admin.passwordHash)) return json(res,400,{error:'كلمة المرور الحالية غير صحيحة'});
+    db.admin.recoveryPhone=phone; writeDB(db);
+    return json(res,200,{ok:true,recoveryPhone:phone});
+  }
   if(req.method==='GET' && pathname==='/api/teacher/dashboard'){
-    if(!requireRole(req,res,['teacher']))return; return json(res,200,{settings:db.settings,classes:db.classes.map(classPublic),students:db.students.map(x=>studentPublic(x,true)),videos:(db.videos||[]).map(videoPublic),games:db.games.map(gamePublic),electronicTests:db.electronicTests.map(testPublic),results:db.results.map(resultPublic).reverse(),videoProgress:db.videoProgress,activities:db.activities.filter(a=>a.type!=='login'&&a.type!=='logout'&&a.type!=='page_view')});
+    if(!requireRole(req,res,['teacher']))return; return json(res,200,{settings:db.settings,adminUsername:db.admin.username,adminRecoveryPhone:db.admin.recoveryPhone||'',classes:db.classes.map(classPublic),students:db.students.map(x=>studentPublic(x,true)),videos:(db.videos||[]).map(videoPublic),games:db.games.map(gamePublic),electronicTests:db.electronicTests.map(testPublic),results:db.results.map(resultPublic).reverse(),videoProgress:db.videoProgress,activities:db.activities.filter(a=>a.type!=='login'&&a.type!=='logout'&&a.type!=='page_view')});
   }
   if(req.method==='POST' && pathname==='/api/classes'){
     if(!requireRole(req,res,['teacher']))return; const b=JSON.parse(await body(req)||'{}'); if(!b.name)return json(res,400,{error:'اسم الصف مطلوب'}); const c={id:uid('class'),name:String(b.name).trim(),subject:String(b.subject||'').trim(),createdAt:Date.now()}; db.classes.push(c);writeDB(db);return json(res,201,{class:c});
@@ -178,7 +227,7 @@ async function handle(req,res){
       if(!result.fields.title||!result.fields.classId){try{fs.unlinkSync(result.file.path)}catch{};return json(res,400,{error:'أكمل عنوان الفيديو والصف والملف'});}
       const existingId=String(result.fields.existingId||'').trim(); const id=existingId||uid('video'); const ext=(path.extname(result.file.originalName)||'.mp4').toLowerCase(); const finalName=id+ext; const final=path.join(VIDEOS_DIR,finalName);
       const old=existingId?db.videos.find(x=>x.id===existingId):null; if(existingId&&!old){try{fs.unlinkSync(result.file.path)}catch{};return json(res,404,{error:'الفيديو المطلوب استبداله غير موجود'});}
-      try{if(old?.filename&&old.filename!==finalName){try{fs.unlinkSync(path.join(VIDEOS_DIR,old.filename))}catch{}} fs.renameSync(result.file.path,final);}catch(e){try{fs.unlinkSync(result.file.path)}catch{};return json(res,500,{error:'تعذر حفظ الفيديو'});}
+      try{if(old?.filename&&old.filename!==finalName){try{fs.unlinkSync(path.join(VIDEOS_DIR,old.filename))}catch{}} fs.renameSync(result.file.path,final);}catch(e){console.error('video upload rename failed:',e);try{fs.unlinkSync(result.file.path)}catch{};return json(res,500,{error:'تعذر حفظ الفيديو'});}
       const v=old||{id};Object.assign(v,{id,title:String(result.fields.title).trim(),classId:String(result.fields.classId),description:String(result.fields.description||'').trim(),durationSeconds:Number(result.fields.durationSeconds||0),sourceType:'upload',filename:finalName,mimeType:result.file.mimeType||'video/mp4',originalName:result.file.originalName,sizeBytes:result.file.size,createdAt:old?.createdAt||Date.now()});
       if(!old)db.videos.push(v); else db.videoProgress.filter(x=>x.videoId===id).forEach(x=>{x.durationSeconds=v.durationSeconds}); writeDB(db);return json(res,old?200:201,{video:videoPublic(v)});
     }catch(e){console.error(e);return json(res,400,{error:e.message||'تعذر رفع الفيديو'});}
@@ -228,7 +277,7 @@ async function handle(req,res){
     if(!requireRole(req,res,['teacher','parent']))return;const id=pathname.split('/')[3];const r=db.results.find(x=>x.id===id);if(!r)return json(res,404,{error:'النتيجة غير موجودة'});const st=db.students.find(x=>x.id===r.studentId);const out=await sendWhatsAppIfConfigured(st,r);return json(res,200,{whatsapp:out});
   }
   if(req.method==='GET' && pathname.startsWith('/api/teacher/students/') && pathname.endsWith('/report')){
-    if(!requireRole(req,res,['teacher']))return; const parts=pathname.split('/'); const id=parts[3]; const st=db.students.find(x=>x.id===id); if(!st)return json(res,404,{error:'الطالب غير موجود'});
+    if(!requireRole(req,res,['teacher']))return; const parts=pathname.split('/'); const id=parts[4]; const st=db.students.find(x=>x.id===id); if(!st)return json(res,404,{error:'الطالب غير موجود'});
     const videos=(db.videos||[]).filter(v=>v.classId===st.classId); const vp=db.videoProgress.filter(x=>x.studentId===id); const studentResults=db.results.filter(r=>r.studentId===id); const entered=[...new Set(db.activities.filter(x=>x.studentId===id&&x.type==='game_open').map(x=>x.gameId).filter(Boolean))]; const enteredTests=[...new Set(db.activities.filter(x=>x.studentId===id&&x.type==='test_open').map(x=>x.testId).filter(Boolean).concat(studentResults.filter(r=>r.testId).map(r=>r.testId)))]; const games=db.games.filter(g=>entered.includes(g.id)||studentResults.some(r=>r.gameId===g.id)); const tests=db.electronicTests.filter(t=>enteredTests.includes(t.id)); const results=studentResults.sort((a,b)=>b.createdAt-a.createdAt); const activities=activitiesFor(id);
     return json(res,200,{student:studentPublic(st,true),class:classPublic(db.classes.find(c=>c.id===st.classId)||{name:'بدون صف'}),videos:videos.map(videoPublic),videoProgress:vp,games:games.map(gamePublic),tests:tests.map(testPublic),results,activities});
   }
@@ -244,10 +293,7 @@ async function handle(req,res){
   return json(res,404,{error:'المسار غير موجود'});
 }
 function safeParentName(st){return st.parentName||'ولي الأمر';}
-async function sendWhatsAppIfConfigured(st,r){
-  const kind=r.resultType==='test'?'الاختبار الإلكتروني':'اللعبة التعليمية'; const title=r.title||r.gameTitle||r.testTitle||'النشاط';
-  const msg=`السلام عليكم،\nتم الانتهاء من ${kind} "${title}" للطالب ${r.studentName}.\nالدرجة: ${r.score} من ${r.total}\nالنسبة: ${r.percentage}%\nمع تمنياتنا بالتوفيق.`;
-  const phone=cleanPhone(st?.parentPhone);
+async function sendWhatsAppRaw(phone,msg){
   const manual=`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
   const token=process.env.WHATSAPP_TOKEN; const phoneNumberId=process.env.WHATSAPP_PHONE_NUMBER_ID; const apiVersion=process.env.WHATSAPP_API_VERSION||'v23.0';
   if(!token||!phoneNumberId||!phone){ return {mode:'manual',url:manual,message:'تم تجهيز رسالة واتساب. للإرسال الآلي ضع بيانات WhatsApp Cloud API في متغيرات البيئة.'}; }
@@ -257,20 +303,28 @@ async function sendWhatsAppIfConfigured(st,r){
     const resp=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const data=await resp.json();
     if(!resp.ok) return {mode:'manual',url:manual,message:'تعذر الإرسال الآلي، استخدم الرابط الجاهز.',error:data};
-    r.notified=true;r.notifiedAt=Date.now();writeDB(db);return {mode:'automatic',message:'تم إرسال إشعار واتساب تلقائياً.'};
+    return {mode:'automatic',message:'تم الإرسال تلقائياً عبر واتساب.'};
   }catch(e){return {mode:'manual',url:manual,message:'تعذر الاتصال بخدمة واتساب، استخدم الرابط الجاهز.',error:e.message};}
+}
+async function sendWhatsAppIfConfigured(st,r){
+  const kind=r.resultType==='test'?'الاختبار الإلكتروني':'اللعبة التعليمية'; const title=r.title||r.gameTitle||r.testTitle||'النشاط';
+  const msg=`السلام عليكم،\nتم الانتهاء من ${kind} "${title}" للطالب ${r.studentName}.\nالدرجة: ${r.score} من ${r.total}\nالنسبة: ${r.percentage}%\nمع تمنياتنا بالتوفيق.`;
+  const phone=cleanPhone(st?.parentPhone);
+  const out=await sendWhatsAppRaw(phone,msg);
+  if(out.mode==='automatic'){ r.notified=true;r.notifiedAt=Date.now();writeDB(db); }
+  return out;
 }
 async function parseMultipartUpload(req,res,maxBytes){
   const ct=req.headers['content-type']||''; const m=ct.match(/boundary="?([^";]+)"?/i); if(!m)throw new Error('بيانات الرفع غير صالحة');
   const boundary=Buffer.from(`--${m[1]}`), marker=Buffer.from(`\r\n--${m[1]}`), crlf=Buffer.from('\r\n');
   let buf=Buffer.alloc(0), state='preamble', current=null, fields={}, file=null, total=0, ended=false;
   const temp=path.join(VIDEOS_DIR,`upload_${uid('tmp')}`);
-  let ws=null;
+  let ws=null, fileClosePromise=null;
   const parseHeaders=(b)=>{const out={};for(const line of b.toString('utf8').split('\r\n')){const i=line.indexOf(':');if(i<0)continue;out[line.slice(0,i).trim().toLowerCase()]=line.slice(i+1).trim()}return out};
   const disposition=(v)=>{const r={};for(const part of String(v||'').split(';').slice(1)){const i=part.indexOf('=');if(i<0)continue;let val=part.slice(i+1).trim();if(val.startsWith('"')&&val.endsWith('"'))val=val.slice(1,-1);r[part.slice(0,i).trim()]=val}return r};
-  function startPart(headers){const d=disposition(headers['content-disposition']);current={name:d.name||'',filename:d.filename||null,mime:headers['content-type']||''};if(current.filename){ws=fs.createWriteStream(temp);file={path:temp,originalName:path.basename(current.filename),mimeType:current.mime||'application/octet-stream',size:0};}else current.chunks=[];}
+  function startPart(headers){const d=disposition(headers['content-disposition']);current={name:d.name||'',filename:d.filename||null,mime:headers['content-type']||''};if(current.filename){ws=fs.createWriteStream(temp);fileClosePromise=new Promise((resolve,reject)=>{ws.once('close',resolve);ws.once('error',reject)});file={path:temp,originalName:path.basename(current.filename),mimeType:current.mime||'application/octet-stream',size:0};}else current.chunks=[];}
   function writeData(chunk){if(!chunk.length)return;total+=chunk.length;if(total>maxBytes)throw new Error('حجم الرفع أكبر من الحد المسموح');if(current?.filename){file.size+=chunk.length;ws.write(chunk)}else if(current)current.chunks.push(Buffer.from(chunk));}
-  function finishPart(){if(!current)return;if(current.filename){ws.end();}else{fields[current.name]=Buffer.concat(current.chunks).toString('utf8')}current=null;ws=null}
+  function finishPart(){if(!current)return;if(current.filename){ws.end();}else{fields[current.name]=Buffer.concat(current.chunks).toString('utf8')}current=null}
   function consume(){
     while(true){
       if(state==='preamble'){
@@ -286,7 +340,7 @@ async function parseMultipartUpload(req,res,maxBytes){
     const fail=e=>{if(ended)return;ended=true;try{ws?.destroy();}catch{}try{fs.unlinkSync(temp)}catch{};reject(e)};
     req.on('data',chunk=>{try{buf=Buffer.concat([buf,chunk]);consume()}catch(e){fail(e);req.destroy()}});
     req.on('error',fail);
-    req.on('end',()=>{try{if(state!=='done')throw new Error('ملف الرفع غير مكتمل');const done=()=>{if(ended)return;ended=true;resolve({fields,file})};if(ws)ws.once('close',done);else done()}catch(e){fail(e)}});
+    req.on('end',()=>{(async()=>{try{if(state!=='done')throw new Error('ملف الرفع غير مكتمل');if(fileClosePromise)await fileClosePromise;if(ended)return;ended=true;resolve({fields,file})}catch(e){fail(e)}})()});
   });
 }
 
