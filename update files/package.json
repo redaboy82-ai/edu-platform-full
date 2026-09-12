@@ -1,0 +1,8 @@
+{
+  "name":"edu-platform",
+  "version":"2.0.0",
+  "private":true,
+  "description":"منصة الدروس التعليمية - متابعة الفيديوهات والألعاب والاختبارات",
+  "scripts":{"start":"node server.js"},
+  "engines":{"node":">=18"}
+}
