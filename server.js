@@ -355,4 +355,9 @@ function streamVideo(file,res,mime,range){
 function serveFile(file,res,type=null,cache=true){if(!fs.existsSync(file))return text(res,404,'Not found');const ext=path.extname(file).toLowerCase();const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.json':'application/json; charset=utf-8'};const data=fs.readFileSync(file);res.writeHead(200,{'Content-Type':type||types[ext]||'application/octet-stream','Cache-Control':cache?'public, max-age=300':'no-store','Content-Length':data.length});res.end(data)}
 
 const server=http.createServer((req,res)=>handle(req,res).catch(e=>{console.error(e);json(res,500,{error:'حدث خطأ في الخادم'})}));
+// رفع الفيديوهات قد يستغرق وقتًا طويلاً على اتصالات بطيئة (حتى 600 ميجابايت للملف الواحد).
+// المهلة الافتراضية في Node لإنهاء أي طلب هي 5 دقائق فقط، وهو ما يقطع عمليات الرفع الكبيرة قبل اكتمالها.
+// نرفعها هنا إلى ساعة كاملة حتى لا يُقطع رفع الفيديو منتصف الطريق على اتصالات الإنترنت البطيئة.
+server.requestTimeout = 60*60*1000; // ساعة واحدة كحد أقصى لإكمال الطلب (يشمل رفع الملف)
+server.headersTimeout = 65*1000; // وقت وصول رؤوس الطلب فقط، يبقى صغيرًا فهذه المرحلة سريعة دائمًا
 server.listen(PORT,()=>console.log(`Edu Platform running on http://localhost:${PORT}`));
