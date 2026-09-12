@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: edu-platform
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: ADMIN_USERNAME
+        value: redaawad
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DATA_DIR
+        value: /var/data
+      - key: GAMES_DIR
+        value: /var/data/games
+      - key: VIDEOS_DIR
+        value: /var/data/videos
+      - key: AUDIOS_DIR
+        value: /var/data/audios
+    disk:
+      name: edu-data
+      mountPath: /var/data
+      sizeGB: 10
