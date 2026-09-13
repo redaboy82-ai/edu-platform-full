@@ -6,11 +6,49 @@ const { URL } = require('url');
 
 const PORT=Number(process.env.PORT||3000);
 const ROOT=__dirname;
-const DATA_DIR=process.env.DATA_DIR?path.resolve(process.env.DATA_DIR):(process.env.NODE_ENV==='production'?'/var/data':path.join(ROOT,'data'));
-const GAMES_DIR=process.env.GAMES_DIR?path.resolve(process.env.GAMES_DIR):path.join(ROOT,'games');
-const VIDEOS_DIR=process.env.VIDEOS_DIR?path.resolve(process.env.VIDEOS_DIR):path.join(ROOT,'videos');
-const AUDIOS_DIR=process.env.AUDIOS_DIR?path.resolve(process.env.AUDIOS_DIR):path.join(ROOT,'audios');
-const DOCUMENTS_DIR=process.env.DOCUMENTS_DIR?path.resolve(process.env.DOCUMENTS_DIR):path.join(ROOT,'documents');
+
+// Render may expose DATA_DIR=/var/data even when a Persistent Disk is not
+// actually attached to the current service. Never let that make the whole
+// deployment crash with EACCES. Prefer the persistent disk, but verify that
+// the directory is really writable before using it.
+function writableDir(candidate){
+  try{
+    fs.mkdirSync(candidate,{recursive:true});
+    const probe=path.join(candidate,`.write-test-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(probe,'ok','utf8');
+    fs.unlinkSync(probe);
+    return true;
+  }catch(e){
+    console.warn(`Storage path is not writable: ${candidate} (${e.code||e.message})`);
+    return false;
+  }
+}
+function chooseStorageDir(){
+  const configured=process.env.DATA_DIR?path.resolve(process.env.DATA_DIR):null;
+  const candidates=[
+    ...(configured?[configured]:[]),
+    ...(process.env.NODE_ENV==='production'?['/var/data']:[]),
+    path.join(ROOT,'.data'),
+    path.join('/tmp','edu-platform-data')
+  ];
+  for(const candidate of [...new Set(candidates)]){
+    if(writableDir(candidate)) return candidate;
+  }
+  throw new Error('لا يوجد مسار تخزين قابل للكتابة. راجع صلاحيات Render أو Persistent Disk.');
+}
+
+const DATA_DIR=chooseStorageDir();
+// Keep uploaded files beside db.json. This guarantees that DB and uploads
+// use the same persistent disk when /var/data is available. Explicit *_DIR
+// variables are still supported, but only when their paths are writable.
+function chooseSubDir(envName, subName){
+  const configured=process.env[envName]?path.resolve(process.env[envName]):path.join(DATA_DIR,subName);
+  return writableDir(configured)?configured:path.join(DATA_DIR,subName);
+}
+const GAMES_DIR=chooseSubDir('GAMES_DIR','games');
+const VIDEOS_DIR=chooseSubDir('VIDEOS_DIR','videos');
+const AUDIOS_DIR=chooseSubDir('AUDIOS_DIR','audios');
+const DOCUMENTS_DIR=chooseSubDir('DOCUMENTS_DIR','documents');
 const DOCUMENT_MAX_BYTES=40*1024*1024;
 const PUBLIC_DIR=path.join(ROOT,'public');
 const VIDEO_MAX_BYTES=600*1024*1024;
@@ -19,7 +57,8 @@ const BODY_MAX_BYTES=35*1024*1024;
 const DB_FILE=path.join(DATA_DIR,'db.json');
 const sessions=new Map();
 for(const d of [DATA_DIR,GAMES_DIR,VIDEOS_DIR,AUDIOS_DIR,DOCUMENTS_DIR]) fs.mkdirSync(d,{recursive:true});
-if(process.env.NODE_ENV==='production' && !process.env.DATA_DIR) console.warn('DATA_DIR غير محدد؛ سيتم استخدام /var/data للتخزين الدائم. يجب ربط Persistent Disk على Render بهذا المسار.');
+console.log(`Storage directory: ${DATA_DIR}`);
+if(process.env.NODE_ENV==='production' && DATA_DIR!== '/var/data') console.warn('تحذير: لم يتم استخدام /var/data. تم اختيار مسار بديل قابل للكتابة. لضمان عدم فقد البيانات بعد إعادة النشر، أضف Persistent Disk في Render واربطه على /var/data.');
 function uid(p='id'){return `${p}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;}
 function code(p='P'){return `${p}-${Math.random().toString(36).slice(2,8).toUpperCase()}`;}
 function cleanPhone(v){return String(v||'').replace(/[^0-9]/g,'').replace(/^00/,'');}

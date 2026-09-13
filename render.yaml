@@ -14,16 +14,6 @@ services:
         value: redaawad
       - key: ADMIN_PASSWORD
         sync: false
-      - key: DATA_DIR
-        value: /var/data
-      - key: GAMES_DIR
-        value: /var/data/games
-      - key: VIDEOS_DIR
-        value: /var/data/videos
-      - key: AUDIOS_DIR
-        value: /var/data/audios
-      - key: DOCUMENTS_DIR
-        value: /var/data/documents
     disk:
       name: edu-data
       mountPath: /var/data
