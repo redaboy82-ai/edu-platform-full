@@ -20,6 +20,8 @@ services:
         value: /var/data/videos
       - key: AUDIOS_DIR
         value: /var/data/audios
+      - key: DOCUMENTS_DIR
+        value: /var/data/documents
     disk:
       name: edu-data
       mountPath: /var/data
