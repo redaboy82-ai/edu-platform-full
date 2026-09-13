@@ -8,6 +8,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 20
+      - key: NODE_ENV
+        value: production
       - key: ADMIN_USERNAME
         value: redaawad
       - key: ADMIN_PASSWORD
