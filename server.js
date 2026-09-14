@@ -303,7 +303,14 @@ async function handleGoogleDriveStream(item,res,req,kind){
 }
 function videoPublic(v){return {id:v.id,title:v.title,classId:v.classId,subjectId:v.subjectId||'',description:v.description||'',durationSeconds:Number(v.durationSeconds||0),sourceType:v.sourceType||'url',telegramFileId:v.telegramFileId||'',url:(v.sourceType==='upload'||v.sourceType==='telegram')?null:(v.url||''),drivePreviewUrl:v.sourceType==='drive'?googleDrivePreviewUrl(v.url):'',visibility:contentPublic(v)}}
 function audioPublic(v){return {id:v.id,title:v.title,classId:v.classId,subjectId:v.subjectId||'',description:v.description||'',durationSeconds:Number(v.durationSeconds||0),sourceType:v.sourceType||'url',telegramFileId:v.telegramFileId||'',url:(v.sourceType==='upload'||v.sourceType==='telegram')?null:(v.url||''),drivePreviewUrl:v.sourceType==='drive'?googleDrivePreviewUrl(v.url):'',visibility:contentPublic(v)}}
-function gamePublic(g,teacher=false){return {id:g.id,title:g.title,classId:g.classId,subjectId:g.subjectId||'',description:g.description||'',sourceType:g.sourceType||'upload',telegramFileId:g.telegramFileId||'',url:g.sourceType==='drive'?(g.url||''):null,drivePreviewUrl:g.sourceType==='drive'?googleDrivePreviewUrl(g.url):'',visibility:contentPublic(g),...(teacher&&g.sourceType==='code'?{html:String(g.html||'')}:{})}}
+function gamePublic(g,teacher=false){
+  let html='';
+  if(teacher){
+    if(g.sourceType==='code') html=String(g.html||'');
+    else if(g.sourceType==='upload'&&g.filename){try{const f=path.join(GAMES_DIR,g.filename);if(fs.existsSync(f))html=fs.readFileSync(f,'utf8')}catch{}}
+  }
+  return {id:g.id,title:g.title,classId:g.classId,subjectId:g.subjectId||'',description:g.description||'',sourceType:g.sourceType||'upload',telegramFileId:g.telegramFileId||'',url:g.sourceType==='drive'?(g.url||''):null,drivePreviewUrl:g.sourceType==='drive'?googleDrivePreviewUrl(g.url):'',visibility:contentPublic(g),...(teacher?{html}:{})}
+}
 
 function subjectAllowed(st,item){return !item?.subjectId || (Array.isArray(st?.subjectIds)&&st.subjectIds.map(String).includes(String(item.subjectId)));}
 function contentVisibilityAllowed(item,studentId){const v=item?.visibility||{mode:'all',studentIds:[]};if(v.mode!=='students')return true;return Array.isArray(v.studentIds)&&v.studentIds.map(String).includes(String(studentId));}
