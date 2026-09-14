@@ -232,6 +232,8 @@ function googleDrivePreviewUrl(value){
 function driveSourceUrl(value){
   const s=String(value||'').trim();
   if(!isGoogleDriveUrl(s)) throw new Error('رابط Google Drive غير صالح');
+  // Google Forms are hosted on docs.google.com and are opened directly in an iframe.
+  if(/^https?:\/\/docs\.google\.com\/forms\//i.test(s)) return s;
   if(!googleDriveFileId(s)) throw new Error('تعذر استخراج معرّف ملف Google Drive من الرابط');
   return s;
 }
