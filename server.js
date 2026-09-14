@@ -235,6 +235,27 @@ function driveSourceUrl(value){
   if(!googleDriveFileId(s)) throw new Error('تعذر استخراج معرّف ملف Google Drive من الرابط');
   return s;
 }
+function googleDriveDownloadUrl(value){
+  const id=googleDriveFileId(value);
+  if(!id) throw new Error('معرّف Google Drive غير موجود');
+  return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(id)}&export=download&confirm=t`;
+}
+async function handleGoogleDriveStream(item,res,req,kind){
+  try{
+    const source=item.url||'';
+    const id=googleDriveFileId(source);
+    if(!id)return text(res,400,'رابط Google Drive غير صالح');
+    const headers={};
+    if(req.headers.range)headers.Range=req.headers.range;
+    const r=await fetch(googleDriveDownloadUrl(source),{headers,redirect:'follow'});
+    if(!r.ok)return text(res,r.status,r.status===404?'ملف Google Drive غير موجود أو غير متاح للعامة':'تعذر جلب ملف Google Drive');
+    const fallback={video:'video/mp4',audio:'audio/mpeg',document:item.mimeType||'application/pdf',game:'text/html'}[kind]||'application/octet-stream';
+    const out={'Content-Type':r.headers.get('content-type')||fallback,'Cache-Control':'private, no-store','Content-Disposition':'inline','X-Content-Type-Options':'nosniff'};
+    for(const [from,to] of [['content-length','Content-Length'],['content-range','Content-Range'],['accept-ranges','Accept-Ranges']]){const v=r.headers.get(from);if(v)out[to]=v;}
+    res.writeHead(r.status,out);
+    if(r.body)Readable.fromWeb(r.body).pipe(res); else res.end();
+  }catch(e){console.error('Google Drive stream:',e.message);return text(res,502,e.message||'تعذر تشغيل ملف Google Drive')}
+}
 function videoPublic(v){return {id:v.id,title:v.title,classId:v.classId,subjectId:v.subjectId||'',description:v.description||'',durationSeconds:Number(v.durationSeconds||0),sourceType:v.sourceType||'url',telegramFileId:v.telegramFileId||'',url:(v.sourceType==='upload'||v.sourceType==='telegram')?null:(v.url||''),drivePreviewUrl:v.sourceType==='drive'?googleDrivePreviewUrl(v.url):'',visibility:contentPublic(v)}}
 function audioPublic(v){return {id:v.id,title:v.title,classId:v.classId,subjectId:v.subjectId||'',description:v.description||'',durationSeconds:Number(v.durationSeconds||0),sourceType:v.sourceType||'url',telegramFileId:v.telegramFileId||'',url:(v.sourceType==='upload'||v.sourceType==='telegram')?null:(v.url||''),drivePreviewUrl:v.sourceType==='drive'?googleDrivePreviewUrl(v.url):'',visibility:contentPublic(v)}}
 function gamePublic(g){return {id:g.id,title:g.title,classId:g.classId,subjectId:g.subjectId||'',description:g.description||'',sourceType:g.sourceType||'upload',telegramFileId:g.telegramFileId||'',url:g.sourceType==='drive'?(g.url||''):null,drivePreviewUrl:g.sourceType==='drive'?googleDrivePreviewUrl(g.url):'',visibility:contentPublic(g)}}
@@ -305,6 +326,21 @@ function serveFile(file,res,type){if(!fs.existsSync(file))return text(res,404,'N
 async function handleTelegramProxyItem(item,res,req,kind='file'){try{const r=await telegramFetch(item.telegramFileId,req.headers.range||'');if(!r.ok)return text(res,r.status,'ملف Telegram غير متاح');const defaults={video:'video/mp4',audio:'audio/mpeg',document:item.mimeType||'application/pdf',game:'text/html'};const headers={'Content-Type':r.headers.get('content-type')||item.mimeType||defaults[kind]||'application/octet-stream','Cache-Control':'private, no-store','Content-Disposition':'inline','X-Content-Type-Options':'nosniff'};for(const [k,v] of [['content-length','Content-Length'],['content-range','Content-Range'],['accept-ranges','Accept-Ranges']]){const x=r.headers.get(k);if(x)headers[v]=x;}res.writeHead(r.status,headers);if(r.body)Readable.fromWeb(r.body).pipe(res);else res.end();}catch(e){return text(res,502,e.message||'تعذر جلب الملف من Telegram')}}
 async function handle(req,res){const u=new URL(req.url,`http://${req.headers.host||'localhost'}`),p=u.pathname;if(req.method==='GET'&&p==='/api/health')return json(res,200,{ok:true,persistence:supabaseReady?'supabase':'local',storageDir:DATA_DIR,telegram:telegramEnabled()});if(req.method==='GET'&&p==='/')return serveFile(path.join(PUBLIC_DIR,'index.html'),res);
   if(req.method==='GET'&&p==='/teacher-photo.jpeg')return serveFile(path.join(PUBLIC_DIR,'teacher-photo.jpeg'),res,'image/jpeg');
+  if(req.method==='GET'&&p.startsWith('/drive-stream/')){
+    const a=auth(req)||sessions.get(u.searchParams.get('token'));
+    if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
+    const parts=p.split('/').filter(Boolean),kind=parts[1],id=decodeURIComponent(parts[2]||'');
+    const map={video:'videos',audio:'audios',document:'documents',game:'games'};
+    const item=db[map[kind]]?.find(x=>x.id===id);
+    if(!item||item.sourceType!=='drive')return text(res,404,'ملف Google Drive غير متاح');
+    const sid=a.role==='student'?a.id:a.role==='parent'?String(u.searchParams.get('studentId')||''):'';
+    const st=(a.role==='student'||a.role==='parent')?db.students.find(x=>x.id===sid):null;
+    if(a.role==='parent'&&(!st||st.parentId!==a.parentId))return text(res,403,'غير مصرح');
+    if(st&&(st.classId!==item.classId||!subjectAllowed(st,item)||!contentVisibilityAllowed(item,st.id)))return text(res,403,'غير مصرح');
+    if(st&&kind==='game'&&!st.permissions?.game)return text(res,403,'لا توجد صلاحية للعبة');
+    if(st&&(kind==='video'||kind==='audio')&&!st.permissions?.video)return text(res,403,'لا توجد صلاحية للمحتوى');
+    return handleGoogleDriveStream(item,res,req,kind);
+  }
   if(req.method==='GET'&&p.startsWith('/telegram-stream/')){
     const a=auth(req)||sessions.get(u.searchParams.get('token'));
     if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
