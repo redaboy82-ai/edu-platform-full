@@ -147,8 +147,8 @@ if(!t)return alert('الاختبار غير موجود');
 const raw=String(t.url||'').trim();
 const isForm=/^https?:\/\/(?:forms\.gle|docs\.google\.com\/forms)\//i.test(raw);
 let src='';
-if(isForm){src=`/form-redirect?token=${encodeURIComponent(token)}&url=${encodeURIComponent(raw)}`}
-else if(googleDriveFileId(raw)){src=contentMediaUrl('document',t,user?.id||'')}
+if(isForm){src=`/form-proxy?token=${encodeURIComponent(token)}&url=${encodeURIComponent(raw)}`}
+else if(googleDriveFileId(raw)){src=contentMediaUrl('test',t,user?.id||'')}
 else{return alert('رابط الاختبار غير صالح')}
 const bg=modal(`<div class="modal-head"><b>${esc(t.title)}</b><button class="close">×</button></div><div id="externalTestLoading" class="notice" style="margin-bottom:8px;text-align:center">جارٍ تحميل الاختبار داخل المنصة…</div><iframe id="externalTestFrame" src="${esc(src)}" style="width:100%;height:80vh;border:0;border-radius:10px;background:#fff" allow="autoplay; fullscreen; clipboard-write" allowfullscreen></iframe><div class="notice" style="margin-top:8px">📝 الاختبار يظهر داخل المنصة مباشرة، ولا يتم فتح صفحة Google Drive.</div>`);
 bg.querySelector('.close').onclick=()=>bg.remove();
