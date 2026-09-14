@@ -20,6 +20,8 @@ services:
         sync: false
       - key: SUPABASE_SECRET_KEY
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
     disk:
       name: edu-data
       mountPath: /var/data
