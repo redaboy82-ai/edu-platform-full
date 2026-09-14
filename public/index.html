@@ -117,18 +117,15 @@ async function studentApp(){const j=await api('/api/student/me'),st=j.student,re
 
 async function openDriveTest(t){
 const raw=String(t.url||'').trim();
-const isFormsGle=/^https?:\/\/forms\.gle\//i.test(raw);
-const isDocsForm=/^https?:\/\/docs\.google\.com\/forms\//i.test(raw);
-let src=raw;
-if(isDocsForm){
-  try{const u=new URL(raw);u.searchParams.delete('usp');u.searchParams.set('embedded','true');src=u.toString()}
-  catch{src=`/form-redirect?token=${encodeURIComponent(token)}&url=${encodeURIComponent(raw)}`}
-}else if(isFormsGle){
-  src=`/form-redirect?token=${encodeURIComponent(token)}&url=${encodeURIComponent(raw)}`
-}else if(googleDriveFileId(raw)){src=contentMediaUrl('document',t,user?.id||'')}
-const bg=modal(`<div class="modal-head"><b>${esc(t.title)}</b><button class="close">×</button></div><div id="externalTestLoading" class="notice" style="margin-bottom:8px;text-align:center">جارٍ فتح الاختبار داخل المنصة…</div><iframe id="externalTestFrame" src="${esc(src)}" style="width:100%;height:80vh;border:0;border-radius:10px;background:#fff" allow="autoplay; fullscreen; clipboard-write" allowfullscreen></iframe><div class="notice" style="margin-top:8px">📝 الاختبار الخارجي يعمل داخل المنصة مباشرة باستخدام وضع التضمين الرسمي لـ Google Forms، بدون فتح صفحة Drive.</div>`);
+const isForm=/^https?:\/\/(?:forms\.gle|docs\.google\.com\/forms)\//i.test(raw);
+let src='';
+if(isForm){src=`/form-proxy?token=${encodeURIComponent(token)}&url=${encodeURIComponent(raw)}`}
+else if(googleDriveFileId(raw)){src=contentMediaUrl('document',t,user?.id||'')}
+else{return alert('رابط الاختبار غير صالح')}
+const bg=modal(`<div class="modal-head"><b>${esc(t.title)}</b><button class="close">×</button></div><div id="externalTestLoading" class="notice" style="margin-bottom:8px;text-align:center">جارٍ تحميل الاختبار داخل المنصة…</div><iframe id="externalTestFrame" src="${esc(src)}" style="width:100%;height:80vh;border:0;border-radius:10px;background:#fff" allow="autoplay; fullscreen; clipboard-write" allowfullscreen></iframe><div class="notice" style="margin-top:8px">📝 الاختبار يظهر داخل المنصة مباشرة، ولا يتم فتح صفحة Google Drive.</div>`);
 bg.querySelector('.close').onclick=()=>bg.remove();
-const frame=bg.querySelector('#externalTestFrame'),loading=bg.querySelector('#externalTestLoading');frame.addEventListener('load',()=>{if(loading)loading.textContent='تم فتح الاختبار داخل المنصة.'});
+const frame=bg.querySelector('#externalTestFrame'),loading=bg.querySelector('#externalTestLoading');
+frame.addEventListener('load',()=>{if(loading)loading.textContent='تم تحميل الاختبار داخل المنصة.'});
 if(user?.role==='student')try{await api('/api/activity',{method:'POST',body:JSON.stringify({type:'test_open',testId:t.id,title:t.title})})}catch{}
 }
 async function openTest(t,student){if(t.sourceType==='drive')return openDriveTest(t);try{const j=await api('/api/tests/start',{method:'POST',body:JSON.stringify({testId:t.id})});const test=j.test;const bg=modal(`<div class="modal-head"><h2>${esc(test.title)}</h2><button class="close">×</button></div><div id="testBody"></div><div class="row" style="margin-top:14px"><button class="btn primary" id="submitTest">تسليم الاختبار</button></div>`);const box=bg.querySelector('#testBody');box.innerHTML=(test.questions||[]).map((q,i)=>`<div class="card" style="margin:10px 0"><b>${i+1}. ${esc(q.text||'')}</b>${q.image?`<img class="question-image" src="${esc(imageSrc(q.image,test.id))}">`:''}${q.type==='truefalse'?`<div class="row" style="margin-top:10px"><label><input type="radio" name="q_${q.id}" value="true"> صح</label><label><input type="radio" name="q_${q.id}" value="false"> خطأ</label></div>`:`<div>${(q.options||[]).map(o=>`<label style="display:block;margin:8px 0"><input type="checkbox" data-q="${esc(q.id)}" value="${esc(o.id)}"> ${esc(o.text||'')}${o.image?`<img class="question-image" src="${esc(imageSrc(o.image,test.id))}">`:''}</label>`).join('')}</div>`}</div>`).join('');bg.querySelector('#submitTest').onclick=async()=>{const answers={};for(const q of test.questions||[]){if(q.type==='truefalse'){const x=bg.querySelector(`input[name="q_${CSS.escape(q.id)}"]:checked`);if(x)answers[q.id]=x.value}else{answers[q.id]=[...bg.querySelectorAll(`input[data-q="${CSS.escape(q.id)}"]:checked`)].map(x=>x.value)}}try{const r=await api('/api/tests/submit',{method:'POST',body:JSON.stringify({testId:test.id,answers})});bg.remove();resultDetails(r.result);await studentApp()}catch(e){alert(e.message)}};bg.querySelector('.close').onclick=()=>bg.remove()}catch(e){alert(e.message)}}

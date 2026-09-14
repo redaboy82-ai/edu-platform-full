@@ -378,6 +378,27 @@ function serveFile(file,res,type){if(!fs.existsSync(file))return text(res,404,'N
 async function handleTelegramProxyItem(item,res,req,kind='file'){try{const r=await telegramFetch(item.telegramFileId,req.headers.range||'');if(!r.ok)return text(res,r.status,'ملف Telegram غير متاح');const defaults={video:'video/mp4',audio:'audio/mpeg',document:item.mimeType||'application/pdf',game:'text/html'};const headers={'Content-Type':r.headers.get('content-type')||item.mimeType||defaults[kind]||'application/octet-stream','Cache-Control':'private, no-store','Content-Disposition':'inline','X-Content-Type-Options':'nosniff'};for(const [k,v] of [['content-length','Content-Length'],['content-range','Content-Range'],['accept-ranges','Accept-Ranges']]){const x=r.headers.get(k);if(x)headers[v]=x;}res.writeHead(r.status,headers);if(r.body)Readable.fromWeb(r.body).pipe(res);else res.end();}catch(e){return text(res,502,e.message||'تعذر جلب الملف من Telegram')}}
 async function handle(req,res){const u=new URL(req.url,`http://${req.headers.host||'localhost'}`),p=u.pathname;if(req.method==='GET'&&p==='/api/health')return json(res,200,{ok:true,persistence:supabaseReady?'supabase':'local',storageDir:DATA_DIR,telegram:telegramEnabled()});if(req.method==='GET'&&p==='/')return serveFile(path.join(PUBLIC_DIR,'index.html'),res);
   if(req.method==='GET'&&p==='/teacher-photo.jpeg')return serveFile(path.join(PUBLIC_DIR,'teacher-photo.jpeg'),res,'image/jpeg');
+  if(req.method==='GET'&&p==='/form-proxy'){
+    const a=auth(req)||sessions.get(u.searchParams.get('token'));
+    if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
+    const raw=u.searchParams.get('url')||'';
+    if(!isGoogleFormUrl(raw))return text(res,400,'رابط Google Forms غير صالح');
+    try{
+      const target=new URL(raw);
+      const r=await fetch(target,{redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36','Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'}});
+      if(!r.ok)return text(res,r.status,'تعذر تحميل Google Forms. تأكد من أن النموذج متاح لمن لديه الرابط.');
+      const finalUrl=new URL(r.url||target.href);
+      if(finalUrl.hostname!=='docs.google.com'||!/^\/forms\//i.test(finalUrl.pathname))return text(res,400,'الرابط لا يشير إلى نموذج Google Forms صالح');
+      let html=await r.text();
+      // Serve the form as same-origin content inside our authenticated iframe.
+      // We intentionally do not forward Google frame/CSP response headers.
+      html=html.replace(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*>/ig,'');
+      html=html.replace(/<meta[^>]+http-equiv=["']x-frame-options["'][^>]*>/ig,'');
+      if(/<head\b[^>]*>/i.test(html))html=html.replace(/<head\b[^>]*>/i,'$&<base href="'+finalUrl.origin+'/">');
+      res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});
+      return res.end(html);
+    }catch(e){console.error('Google Forms proxy:',e.message);return text(res,502,'تعذر تحميل الاختبار من Google Forms. تأكد من إتاحة النموذج للجمهور.');}
+  }
   if(req.method==='GET'&&p==='/form-redirect'){
     const a=auth(req)||sessions.get(u.searchParams.get('token'));
     if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
