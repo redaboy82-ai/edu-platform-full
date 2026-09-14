@@ -158,7 +158,7 @@ function normalizeDB(current){
   for(const c of current.classes){ c.subjects=Array.isArray(c.subjects)?c.subjects:[]; if(!c.subjects.length && String(c.subject||'').trim()) c.subjects=[{id:uid('subject'),name:String(c.subject).trim(),createdAt:c.createdAt||Date.now()}]; delete c.subject; }
   for(const st of current.students){ st.subjectIds=Array.isArray(st.subjectIds)?st.subjectIds.map(String):[]; const c=current.classes.find(x=>x.id===st.classId); if(c && !st.subjectIds.length) st.subjectIds=c.subjects.map(x=>String(x.id)); }
   current.videos=Array.isArray(current.videos)?current.videos:[];current.audios=Array.isArray(current.audios)?current.audios:[];current.games=Array.isArray(current.games)?current.games:[];current.results=Array.isArray(current.results)?current.results:[];current.videoProgress=Array.isArray(current.videoProgress)?current.videoProgress:[];current.audioProgress=Array.isArray(current.audioProgress)?current.audioProgress:[];current.activities=Array.isArray(current.activities)?current.activities:[];current.testRetakes=Array.isArray(current.testRetakes)?current.testRetakes:[];current.legacyElectronicTests=Array.isArray(current.legacyElectronicTests)?current.legacyElectronicTests:[];current.documents=Array.isArray(current.documents)?current.documents:[];
-  const currentTests=Array.isArray(current.electronicTests)?current.electronicTests:[];current.electronicTests=[];for(const t of currentTests){if(Array.isArray(t.questions))current.electronicTests.push({...t,availableAt:Number(t.createdAt||Date.now())});else current.legacyElectronicTests.push(t)}
+  const currentTests=Array.isArray(current.electronicTests)?current.electronicTests:[];current.electronicTests=[];for(const t of currentTests){if(Array.isArray(t.questions)){const x={...t,availableAt:Number(t.createdAt||Date.now())};if(isGoogleFormUrl(x.url||'')){x.sourceType='drive';x.url=String(x.url).trim();x.questions=[];}current.electronicTests.push(x);}else current.legacyElectronicTests.push(t)}
   if(current.admin?.username==='admin'&&!current.admin.passwordChangedAt){current.admin.username=process.env.ADMIN_USERNAME||'redaawad';current.admin.passwordHash=hashPassword(process.env.ADMIN_PASSWORD||'135790');}
   if(!current.admin?.recoveryPhone){current.admin=current.admin||{};current.admin.recoveryPhone=cleanPhone(process.env.ADMIN_RECOVERY_PHONE||'201093559477');}
   (function migrateParents(){
@@ -317,7 +317,7 @@ function contentVisibilityAllowed(item,studentId){const v=item?.visibility||{mod
 function contentPublic(x){return {mode:x?.visibility?.mode==='students'?'students':'all',studentIds:Array.isArray(x?.visibility?.studentIds)?x.visibility.studentIds:[]};}
 function documentPublic(d){return {id:d.id,title:d.title,classId:d.classId,subjectId:d.subjectId||'',description:d.description||'',sourceType:d.sourceType||'upload',telegramFileId:d.telegramFileId||'',mimeType:d.mimeType||'application/pdf',originalName:d.originalName||'',url:(d.sourceType==='telegram'?null:d.url||null),visibility:contentPublic(d)};}
 
-function testSummary(t){return {id:t.id,title:t.title,classId:t.classId,subjectId:t.subjectId||'',description:t.description||'',questionCount:(t.questions||[]).length,sourceType:t.sourceType||'internal',url:t.sourceType==='drive'?(t.url||''):null,drivePreviewUrl:t.sourceType==='drive'?googleDrivePreviewUrl(t.url):'',visibility:contentPublic(t)}}
+function testSummary(t){const external=String(t.sourceType||'')==='drive'||isGoogleFormUrl(t.url||'');return {id:t.id,title:t.title,classId:t.classId,subjectId:t.subjectId||'',description:t.description||'',questionCount:(t.questions||[]).length,sourceType:external?'drive':(t.sourceType||'internal'),url:external?(t.url||''):null,drivePreviewUrl:external&&!isGoogleFormUrl(t.url||'')?googleDrivePreviewUrl(t.url):'',visibility:contentPublic(t)}}
 function testPublic(t,teacher=false){return {...testSummary(t),questions:(t.questions||[]).map(q=>{const rawImage=q.image||'',rawNoteImage=q.noteImage||'';const b={id:q.id,type:q.type,text:q.text||'',image:questionImagePublic(rawImage,t.id),imageRef:teacher?rawImage:'',options:(q.options||[]).map(o=>({id:o.id,text:o.text||'',image:questionImagePublic(o.image,t.id),imageRef:teacher?(o.image||''):''}))};return teacher?{...b,note:q.note||'',noteImage:questionImagePublic(rawNoteImage,t.id),noteImageRef:rawNoteImage,noteVideoId:q.noteVideoId||'',noteAudioId:q.noteAudioId||'',correctOptionId:q.correctOptionId||'',correctOptionIds:Array.isArray(q.correctOptionIds)?q.correctOptionIds:(q.correctOptionId?[q.correctOptionId]:[]),correctAnswer:typeof q.correctAnswer==='boolean'?q.correctAnswer:null}:b})}}
 function activitiesFor(id){return db.activities.filter(a=>a.studentId===id&&a.type!=='login'&&a.type!=='logout'&&a.type!=='page_view').sort((a,b)=>b.createdAt-a.createdAt)}
 function sanitizeImage(value,label,maxBytes=2*1024*1024){
@@ -376,45 +376,132 @@ function streamFile(file,res,mime,range){const st=fs.statSync(file),size=st.size
 function serveFile(file,res,type){if(!fs.existsSync(file))return text(res,404,'Not found');const ext=path.extname(file).toLowerCase();const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.json':'application/json; charset=utf-8'};const d=fs.readFileSync(file);res.writeHead(200,{'Content-Type':type||types[ext]||'application/octet-stream','Cache-Control':'no-store','Content-Length':d.length});res.end(d)}
 
 async function handleTelegramProxyItem(item,res,req,kind='file'){try{const r=await telegramFetch(item.telegramFileId,req.headers.range||'');if(!r.ok)return text(res,r.status,'ملف Telegram غير متاح');const defaults={video:'video/mp4',audio:'audio/mpeg',document:item.mimeType||'application/pdf',game:'text/html'};const headers={'Content-Type':r.headers.get('content-type')||item.mimeType||defaults[kind]||'application/octet-stream','Cache-Control':'private, no-store','Content-Disposition':'inline','X-Content-Type-Options':'nosniff'};for(const [k,v] of [['content-length','Content-Length'],['content-range','Content-Range'],['accept-ranges','Accept-Ranges']]){const x=r.headers.get(k);if(x)headers[v]=x;}res.writeHead(r.status,headers);if(r.body)Readable.fromWeb(r.body).pipe(res);else res.end();}catch(e){return text(res,502,e.message||'تعذر جلب الملف من Telegram')}}
+function safeDownloadName(value,fallback='file'){
+  const raw=String(value||fallback).trim().replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').replace(/\s+/g,' ').slice(0,180);
+  return raw||fallback;
+}
+function attachmentHeader(name){
+  const ascii=safeDownloadName(name,'file').replace(/[^\x20-\x7E]/g,'_');
+  const encoded=encodeURIComponent(safeDownloadName(name,'file'));
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+async function downloadTeacherItem(item,kind,res,req){
+  try{
+    let name=safeDownloadName(item.originalName||item.filename||item.title||`${kind}`,'file');
+    let ext=path.extname(name);
+    if(kind==='video'&&!ext)name+='.mp4';
+    if(kind==='audio'&&!ext)name+='.mp3';
+    if(kind==='document'&&!ext)name+=(item.mimeType==='application/pdf'?'.pdf':'.bin');
+    if(kind==='game'&&!ext)name+='.html';
+
+    if(kind==='game' && (item.sourceType==='code' || item.html)){
+      const html=String(item.html||'');
+      if(!html.trim())return text(res,404,'كود اللعبة غير موجود');
+      const body=Buffer.from(html,'utf8');
+      res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Content-Disposition':attachmentHeader(name.endsWith('.html')?name:name+'.html'),'Cache-Control':'private, no-store','Content-Length':body.length,'X-Content-Type-Options':'nosniff'});
+      return res.end(body);
+    }
+    if(kind==='test' && isGoogleFormUrl(item.url||'')){
+      const body=Buffer.from(`رابط الاختبار الإلكتروني:\n${String(item.url||'').trim()}\n`,'utf8');
+      name=safeDownloadName(item.title||'google-form-test')+'.url.txt';
+      res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Content-Disposition':attachmentHeader(name),'Cache-Control':'private, no-store','Content-Length':body.length,'X-Content-Type-Options':'nosniff'});
+      return res.end(body);
+    }
+    if(kind==='test' && item.sourceType!=='drive' && Array.isArray(item.questions)){
+      const exportData={title:item.title,classId:item.classId,subjectId:item.subjectId||'',description:item.description||'',questions:item.questions};
+      const body=Buffer.from(JSON.stringify(exportData,null,2),'utf8');
+      name=safeDownloadName(item.title||'test')+'.json';
+      res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Content-Disposition':attachmentHeader(name),'Cache-Control':'private, no-store','Content-Length':body.length,'X-Content-Type-Options':'nosniff'});
+      return res.end(body);
+    }
+    if(item.sourceType==='drive' || isGoogleDriveUrl(item.url||'')){
+      const id=googleDriveFileId(item.url||'');
+      if(!id)return text(res,400,'رابط Google Drive غير صالح');
+      const r=await fetchGoogleDriveFile(id,req.headers.range||'');
+      if(!r.ok)return text(res,r.status,'تعذر جلب الملف من Google Drive. تأكد من أن الملف متاح لمن لديه الرابط.');
+      const ct=r.headers.get('content-type')||item.mimeType||'application/octet-stream';
+      const h={'Content-Type':ct,'Cache-Control':'private, no-store','Content-Disposition':attachmentHeader(name),'X-Content-Type-Options':'nosniff'};
+      for(const [from,to] of [['content-length','Content-Length'],['content-range','Content-Range'],['accept-ranges','Accept-Ranges']]){const v=r.headers.get(from);if(v)h[to]=v;}
+      res.writeHead(r.status,h); if(r.body)Readable.fromWeb(r.body).pipe(res); else res.end(); return;
+    }
+    if(item.sourceType==='telegram'){
+      if(!item.telegramFileId)return text(res,404,'ملف Telegram غير متاح');
+      const r=await telegramFetch(item.telegramFileId,req.headers.range||'');
+      if(!r.ok)return text(res,r.status,'تعذر جلب الملف من Telegram');
+      const ct=r.headers.get('content-type')||item.mimeType||'application/octet-stream';
+      const h={'Content-Type':ct,'Cache-Control':'private, no-store','Content-Disposition':attachmentHeader(name),'X-Content-Type-Options':'nosniff'};
+      for(const [from,to] of [['content-length','Content-Length'],['content-range','Content-Range'],['accept-ranges','Accept-Ranges']]){const v=r.headers.get(from);if(v)h[to]=v;}
+      res.writeHead(r.status,h); if(r.body)Readable.fromWeb(r.body).pipe(res); else res.end(); return;
+    }
+    if(item.sourceType==='upload' && item.filename){
+      const dirs={video:VIDEOS_DIR,audio:AUDIOS_DIR,document:DOCUMENTS_DIR,game:GAMES_DIR};
+      const dir=dirs[kind]; const f=dir&&path.join(dir,item.filename);
+      if(f&&fs.existsSync(f)){
+        const st=fs.statSync(f);
+        res.writeHead(200,{'Content-Type':item.mimeType||'application/octet-stream','Content-Disposition':attachmentHeader(name),'Cache-Control':'private, no-store','Content-Length':st.size,'X-Content-Type-Options':'nosniff'});
+        return fs.createReadStream(f).pipe(res);
+      }
+    }
+    if(item.url && /^https?:\/\//i.test(item.url)){
+      const target=new URL(item.url);
+      if(['localhost','127.0.0.1','0.0.0.0','::1'].includes(target.hostname))return text(res,400,'الرابط الخارجي غير مسموح');
+      const r=await fetch(target,{redirect:'follow',headers:{'User-Agent':'Mozilla/5.0','Accept':'*/*'}});
+      if(!r.ok)return text(res,r.status,'تعذر جلب الملف من الرابط الخارجي');
+      const ct=r.headers.get('content-type')||item.mimeType||'application/octet-stream';
+      const h={'Content-Type':ct,'Cache-Control':'private, no-store','Content-Disposition':attachmentHeader(name),'X-Content-Type-Options':'nosniff'};
+      const len=r.headers.get('content-length');if(len)h['Content-Length']=len;
+      res.writeHead(r.status,h);if(r.body)Readable.fromWeb(r.body).pipe(res);else res.end();return;
+    }
+    return text(res,404,'الملف غير موجود أو لا يمكن تنزيله');
+  }catch(e){console.error('Teacher download:',e.message);return text(res,502,e.message||'تعذر تنزيل الملف');}
+}
+
 async function handle(req,res){const u=new URL(req.url,`http://${req.headers.host||'localhost'}`),p=u.pathname;if(req.method==='GET'&&p==='/api/health')return json(res,200,{ok:true,persistence:supabaseReady?'supabase':'local',storageDir:DATA_DIR,telegram:telegramEnabled()});if(req.method==='GET'&&p==='/')return serveFile(path.join(PUBLIC_DIR,'index.html'),res);
   if(req.method==='GET'&&p==='/teacher-photo.jpeg')return serveFile(path.join(PUBLIC_DIR,'teacher-photo.jpeg'),res,'image/jpeg');
-  if(req.method==='GET'&&p==='/form-proxy'){
+  if(req.method==='GET'&&p.startsWith('/api/teacher/download/')){
+    const a=auth(req)||sessions.get(u.searchParams.get('token'));
+    if(!a||a.role!=='teacher')return text(res,401,'غير مصرح');
+    const parts=p.split('/').filter(Boolean),kind=parts[3],id=decodeURIComponent(parts.slice(4).join('/')||'');
+    const map={video:'videos',audio:'audios',document:'documents',game:'games',test:'electronicTests'};
+    const list=map[kind]; if(!list||!id)return text(res,400,'بيانات التنزيل غير مكتملة');
+    const item=db[list]?.find(x=>x.id===id); if(!item)return text(res,404,'المحتوى غير موجود');
+    return downloadTeacherItem(item,kind,res,req);
+  }
+  if(req.method==='GET'&&p==='/form-embed'){
     const a=auth(req)||sessions.get(u.searchParams.get('token'));
     if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
-    const raw=u.searchParams.get('url')||'';
+    const raw=String(u.searchParams.get('url')||'').trim();
     if(!isGoogleFormUrl(raw))return text(res,400,'رابط Google Forms غير صالح');
     try{
-      const target=new URL(raw);
-      const r=await fetch(target,{redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36','Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'}});
-      if(!r.ok)return text(res,r.status,'تعذر تحميل Google Forms. تأكد من أن النموذج متاح لمن لديه الرابط.');
-      const finalUrl=new URL(r.url||target.href);
-      if(finalUrl.hostname!=='docs.google.com'||!/^\/forms\//i.test(finalUrl.pathname))return text(res,400,'الرابط لا يشير إلى نموذج Google Forms صالح');
-      let html=await r.text();
-      // Serve the form as same-origin content inside our authenticated iframe.
-      // We intentionally do not forward Google frame/CSP response headers.
-      html=html.replace(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*>/ig,'');
-      html=html.replace(/<meta[^>]+http-equiv=["']x-frame-options["'][^>]*>/ig,'');
-      if(/<head\b[^>]*>/i.test(html))html=html.replace(/<head\b[^>]*>/i,'$&<base href="'+finalUrl.origin+'/">');
-      res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'});
-      return res.end(html);
-    }catch(e){console.error('Google Forms proxy:',e.message);return text(res,502,'تعذر تحميل الاختبار من Google Forms. تأكد من إتاحة النموذج للجمهور.');}
+      let target=new URL(raw);
+      if(target.hostname.toLowerCase()==='forms.gle'){
+        const r=await fetch(target,{redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36','Accept':'text/html,application/xhtml+xml,*/*;q=0.8'}});
+        if(!r.ok)return text(res,r.status,'تعذر الوصول إلى رابط Google Forms');
+        target=new URL(r.url||target.href);
+      }
+      if(target.hostname.toLowerCase()!=='docs.google.com'||!/^\/forms\//i.test(target.pathname)||!/\/viewform$/i.test(target.pathname))return text(res,400,'الرابط لا يشير إلى صفحة عرض Google Forms صالحة');
+      target.searchParams.set('embedded','true');
+      target.searchParams.delete('usp');
+      res.writeHead(302,{'Location':target.toString(),'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});return res.end();
+    }catch(e){console.error('Google Forms embed:',e.message);return text(res,502,'تعذر تجهيز رابط Google Forms.');}
+  }
+  if(req.method==='GET'&&p==='/form-proxy'){
+    // Backward-compatible endpoint: do not proxy Google HTML. Redirect the iframe to
+    // Google's official embedded form URL, which preserves Forms JS, cookies and submission.
+    const a=auth(req)||sessions.get(u.searchParams.get('token'));
+    if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
+    const raw=String(u.searchParams.get('url')||'').trim();
+    if(!isGoogleFormUrl(raw))return text(res,400,'رابط Google Forms غير صالح');
+    const target=`/form-embed?token=${encodeURIComponent(u.searchParams.get('token')||'')}&url=${encodeURIComponent(raw)}`;
+    res.writeHead(302,{'Location':target,'Cache-Control':'no-store'});return res.end();
   }
   if(req.method==='GET'&&p==='/form-redirect'){
     const a=auth(req)||sessions.get(u.searchParams.get('token'));
     if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
-    const raw=u.searchParams.get('url')||'';
-    let current;
-    try{current=new URL(googleFormEmbedUrl(raw));}catch(e){return text(res,400,e.message||'رابط Google Forms غير صالح')}
-    try{
-      const r=await fetch(current,{redirect:'follow',headers:{'User-Agent':'Mozilla/5.0'}});
-      const finalUrl=new URL(r.url||current.href);
-      if(finalUrl.hostname!=='docs.google.com'||!/^\/forms\//i.test(finalUrl.pathname))return text(res,400,'رابط Google Forms لم يُحل إلى نموذج صالح');
-      if(!/\/viewform$/i.test(finalUrl.pathname))return text(res,400,'الرابط ليس رابط عرض لنموذج Google Forms');
-      finalUrl.searchParams.set('embedded','true');
-      finalUrl.searchParams.delete('usp');
-      res.writeHead(302,{'Location':finalUrl.toString(),'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer'});
-      return res.end();
-    }catch(e){return text(res,502,'تعذر فتح Google Forms. تأكد من أن النموذج متاح لمن لديه الرابط.')}
+    const raw=String(u.searchParams.get('url')||'').trim();
+    if(!isGoogleFormUrl(raw))return text(res,400,'رابط Google Forms غير صالح');
+    const target=`/form-embed?token=${encodeURIComponent(u.searchParams.get('token')||'')}&url=${encodeURIComponent(raw)}`;
+    res.writeHead(302,{'Location':target,'Cache-Control':'no-store'});return res.end();
   }
   if(req.method==='GET'&&p.startsWith('/drive-stream/')){
     const a=auth(req)||sessions.get(u.searchParams.get('token'));
