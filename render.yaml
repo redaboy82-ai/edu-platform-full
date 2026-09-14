@@ -14,6 +14,12 @@ services:
         value: redaawad
       - key: ADMIN_PASSWORD
         sync: false
+      - key: SUPABASE_PROJECT_ID
+        value: feezcqadsabyxoyxhcwy
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
     disk:
       name: edu-data
       mountPath: /var/data

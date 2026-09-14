@@ -39,3 +39,18 @@ npm start
 **للتخزين الدائم بعد إعادة النشر:** يجب أن تكون خدمة Render على خطة تدعم Persistent Disk وأن يكون القرص `edu-data` مربوطًا على `/var/data`. ملف `render.yaml` الحالي ينشئ هذا الإعداد عند استخدامه كـ Blueprint. تم حذف متغيرات `DATA_DIR/GAMES_DIR/...` الإلزامية من `render.yaml` حتى لا تجبر الخدمة على `/var/data` إذا لم يكن القرص موجودًا. إذا كان القرص موجودًا، سيختاره التطبيق تلقائيًا.
 
 إذا كانت الخدمة الحالية منشأة من Dashboard وليست Blueprint، أضف Persistent Disk من إعدادات الخدمة: **Disks → Add Disk → Mount Path: `/var/data`** ثم أعد النشر. لا تضع `DATA_DIR=/var/data` يدويًا بدون قرص دائم؛ سيبدأ التطبيق بفضل آلية fallback، لكن البيانات الموجودة في المسار البديل ليست تخزينًا دائمًا بعد إعادة إنشاء الخدمة.
+
+
+## قاعدة البيانات الدائمة عبر Supabase
+
+أضيف دعم مزامنة قاعدة بيانات المنصة إلى Supabase. عنوان المشروع يُبنى تلقائيًا من `SUPABASE_PROJECT_ID`.
+
+### إعداد Supabase مرة واحدة
+1. افتح Supabase SQL Editor.
+2. شغّل الملف `supabase/schema.sql`.
+3. في Render أضف `SUPABASE_PROJECT_ID` و`SUPABASE_PUBLISHABLE_KEY` و`SUPABASE_SECRET_KEY`.
+4. قيمة `SUPABASE_SECRET_KEY` يجب أن تكون **Secret key** من Supabase (`sb_secret_...`) وليس الـ publishable key. لا تضعها في GitHub.
+
+الـ publishable key وحده غير مناسب للوصول الموثوق إلى بيانات الطلاب من الخادم؛ لأن سياسات RLS لا يجب أن تفتح قاعدة البيانات للزوار. الكود يدعم المفتاحين، ويستخدم الـ Secret key للمزامنة الآمنة. إذا لم يتم توفير Secret key سيستمر التطبيق محليًا، لكنه سيطبع تحذيرًا واضحًا.
+
+عند تشغيل المنصة لأول مرة بعد إنشاء الجدول: إذا لم توجد صف `main` في Supabase، يرفع التطبيق قاعدة البيانات المحلية الحالية إلى Supabase. إذا كانت صف `main` موجودة، يحملها التطبيق من Supabase ويستخدمها كمصدر البيانات الأساسي.

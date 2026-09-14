@@ -64,39 +64,110 @@ function code(p='P'){return `${p}-${Math.random().toString(36).slice(2,8).toUppe
 function cleanPhone(v){return String(v||'').replace(/[^0-9]/g,'').replace(/^00/,'');}
 function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')){const hash=crypto.scryptSync(String(password),salt,64).toString('hex');return `${salt}:${hash}`;}
 function verifyPassword(password,stored){try{const [salt,hash]=String(stored).split(':');const actual=crypto.scryptSync(String(password),salt,64).toString('hex');return crypto.timingSafeEqual(Buffer.from(hash,'hex'),Buffer.from(actual,'hex'));}catch{return false}}
-function readDB(){try{return JSON.parse(fs.readFileSync(DB_FILE,'utf8'));}catch(primaryError){try{const backup=DB_FILE+'.bak';if(fs.existsSync(backup))return JSON.parse(fs.readFileSync(backup,'utf8'));}catch{} const db={settings:{schoolName:'منصّة الدروس',autoWhatsApp:true},parents:[],classes:[],students:[],videos:[],audios:[],games:[],electronicTests:[],results:[],videoProgress:[],audioProgress:[],activities:[],testRetakes:[],admin:{id:'admin',username:process.env.ADMIN_USERNAME||'redaawad',passwordHash:hashPassword(process.env.ADMIN_PASSWORD||'135790'),recoveryPhone:cleanPhone(process.env.ADMIN_RECOVERY_PHONE||'201093559477')},legacyElectronicTests:[]};writeDB(db);return db;}}
-function writeDB(db){const tmp=DB_FILE+'.tmp';const backup=DB_FILE+'.bak';const payload=JSON.stringify(db,null,2);fs.writeFileSync(tmp,payload,'utf8');if(fs.existsSync(DB_FILE)){try{fs.copyFileSync(DB_FILE,backup)}catch{}}fs.renameSync(tmp,DB_FILE);}
-let db=readDB();
-db.parents=Array.isArray(db.parents)?db.parents:[];db.classes=Array.isArray(db.classes)?db.classes:[];
-db.students=Array.isArray(db.students)?db.students:[];
-// New subject model: one class can contain many subjects. Migrate the old single subject field.
-for(const c of db.classes){ c.subjects=Array.isArray(c.subjects)?c.subjects:[]; if(!c.subjects.length && String(c.subject||'').trim()) c.subjects=[{id:uid('subject'),name:String(c.subject).trim(),createdAt:c.createdAt||Date.now()}]; delete c.subject; }
-for(const st of db.students){ st.subjectIds=Array.isArray(st.subjectIds)?st.subjectIds.map(String):[]; const c=db.classes.find(x=>x.id===st.classId); if(c && !st.subjectIds.length) st.subjectIds=c.subjects.map(x=>String(x.id)); }
-db.videos=Array.isArray(db.videos)?db.videos:[];db.audios=Array.isArray(db.audios)?db.audios:[];db.games=Array.isArray(db.games)?db.games:[];db.results=Array.isArray(db.results)?db.results:[];db.videoProgress=Array.isArray(db.videoProgress)?db.videoProgress:[];db.audioProgress=Array.isArray(db.audioProgress)?db.audioProgress:[];db.activities=Array.isArray(db.activities)?db.activities:[];db.testRetakes=Array.isArray(db.testRetakes)?db.testRetakes:[];db.legacyElectronicTests=Array.isArray(db.legacyElectronicTests)?db.legacyElectronicTests:[];db.documents=Array.isArray(db.documents)?db.documents:[];
-// Preserve old external tests but keep them out of the new internal-test UI.
-const currentTests=Array.isArray(db.electronicTests)?db.electronicTests:[];db.electronicTests=[];for(const t of currentTests){if(Array.isArray(t.questions))db.electronicTests.push({...t,availableAt:Number(t.createdAt||Date.now())});else db.legacyElectronicTests.push(t)}
-if(db.admin?.username==='admin'&&!db.admin.passwordChangedAt){db.admin.username=process.env.ADMIN_USERNAME||'redaawad';db.admin.passwordHash=hashPassword(process.env.ADMIN_PASSWORD||'135790');}
-if(!db.admin.recoveryPhone)db.admin.recoveryPhone=cleanPhone(process.env.ADMIN_RECOVERY_PHONE||'201093559477');
-// Migrate the old per-student guardian fields into one real parent account per family.
-(function migrateParents(){
-  const byKey=new Map();
-  for(const st of db.students){
-    let parent=db.parents.find(p=>p.id===st.parentId);
-    const key=cleanPhone(st.parentPhone)||st.parentId||String(st.parentCode||'')||`name:${String(st.parentName||'').trim().toLowerCase()}`;
-    if(!parent) parent=byKey.get(key);
-    if(!parent){
-      parent={id:uid('parent'),name:String(st.parentName||'ولي الأمر').trim()||'ولي الأمر',phone:cleanPhone(st.parentPhone),code:st.parentCode||code('P'),passwordHash:st.parentPasswordHash||hashPassword(st.initialParentPassword||Math.random().toString(36).slice(2,8)),initialPassword:st.initialParentPassword||'',createdAt:Date.now()};
-      db.parents.push(parent);byKey.set(key,parent);
+function readDB(){try{return JSON.parse(fs.readFileSync(DB_FILE,'utf8'));}catch(primaryError){try{const backup=DB_FILE+'.bak';if(fs.existsSync(backup))return JSON.parse(fs.readFileSync(backup,'utf8'));}catch{} const db={settings:{schoolName:'منصّة الدروس',autoWhatsApp:true},parents:[],classes:[],students:[],videos:[],audios:[],games:[],electronicTests:[],results:[],videoProgress:[],audioProgress:[],activities:[],testRetakes:[],admin:{id:'admin',username:process.env.ADMIN_USERNAME||'redaawad',passwordHash:hashPassword(process.env.ADMIN_PASSWORD||'135790'),recoveryPhone:cleanPhone(process.env.ADMIN_RECOVERY_PHONE||'201093559477')},legacyElectronicTests:[]};persistLocal(db);return db;}}
+
+// Supabase is the durable database for platform records. The publishable key is
+// read only from Render's environment; it is never hard-coded into the source.
+const SUPABASE_URL=String(process.env.SUPABASE_URL||(
+  process.env.SUPABASE_PROJECT_ID?`https://${process.env.SUPABASE_PROJECT_ID}.supabase.co`:''
+)).replace(/\/$/,'');
+const SUPABASE_KEY=String(process.env.SUPABASE_SECRET_KEY||'');
+const SUPABASE_PUBLISHABLE_KEY=String(process.env.SUPABASE_PUBLISHABLE_KEY||process.env.SUPABASE_ANON_KEY||'');
+const SUPABASE_TABLE=String(process.env.SUPABASE_TABLE||'platform_state');
+const SUPABASE_ROW_ID='main';
+let supabaseReady=false;
+let supabaseSyncChain=Promise.resolve();
+let supabaseWarned=false;
+
+function supabaseEnabled(){return !!(SUPABASE_URL&&SUPABASE_KEY);}
+function persistLocal(current){
+  const tmp=DB_FILE+'.tmp',backup=DB_FILE+'.bak',payload=JSON.stringify(current,null,2);
+  fs.writeFileSync(tmp,payload,'utf8');
+  if(fs.existsSync(DB_FILE)){try{fs.copyFileSync(DB_FILE,backup)}catch{}}
+  fs.renameSync(tmp,DB_FILE);
+}
+async function supabaseRequest(url,options={}){
+  const r=await fetch(url,{...options,headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json',...(options.headers||{})}});
+  const text=await r.text();
+  let json=null;try{json=text?JSON.parse(text):null}catch{}
+  if(!r.ok){const err=new Error(json?.message||json?.error||text||`Supabase HTTP ${r.status}`);err.status=r.status;err.details=json;throw err;}
+  return json;
+}
+async function loadFromSupabase(){
+  if(!supabaseEnabled())return {found:false};
+  const url=`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?select=id,data,updated_at&id=eq.${encodeURIComponent(SUPABASE_ROW_ID)}&limit=1`;
+  const rows=await supabaseRequest(url,{method:'GET'});
+  if(Array.isArray(rows)&&rows[0]?.data)return {found:true,data:rows[0].data,updatedAt:rows[0].updated_at};
+  return {found:false};
+}
+async function saveToSupabase(snapshot){
+  if(!supabaseEnabled()||!supabaseReady)return;
+  const url=`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}`;
+  await supabaseRequest(url,{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({id:SUPABASE_ROW_ID,data:snapshot,updated_at:new Date().toISOString()})});
+}
+function scheduleSupabaseSync(){
+  if(!supabaseReady||!supabaseEnabled())return;
+  const snapshot=JSON.parse(JSON.stringify(db));
+  supabaseSyncChain=supabaseSyncChain.then(()=>saveToSupabase(snapshot)).catch(e=>{
+    if(!supabaseWarned){supabaseWarned=true;console.error(`Supabase sync failed: ${e.message}`);}
+  });
+}
+function writeDB(current){persistLocal(current);scheduleSupabaseSync();}
+
+function normalizeDB(current){
+  current=current&&typeof current==='object'?current:{};
+  current.parents=Array.isArray(current.parents)?current.parents:[];current.classes=Array.isArray(current.classes)?current.classes:[];
+  current.students=Array.isArray(current.students)?current.students:[];
+  // One class -> many subjects. Never create a new class when adding a subject.
+  for(const c of current.classes){ c.subjects=Array.isArray(c.subjects)?c.subjects:[]; if(!c.subjects.length && String(c.subject||'').trim()) c.subjects=[{id:uid('subject'),name:String(c.subject).trim(),createdAt:c.createdAt||Date.now()}]; delete c.subject; }
+  for(const st of current.students){ st.subjectIds=Array.isArray(st.subjectIds)?st.subjectIds.map(String):[]; const c=current.classes.find(x=>x.id===st.classId); if(c && !st.subjectIds.length) st.subjectIds=c.subjects.map(x=>String(x.id)); }
+  current.videos=Array.isArray(current.videos)?current.videos:[];current.audios=Array.isArray(current.audios)?current.audios:[];current.games=Array.isArray(current.games)?current.games:[];current.results=Array.isArray(current.results)?current.results:[];current.videoProgress=Array.isArray(current.videoProgress)?current.videoProgress:[];current.audioProgress=Array.isArray(current.audioProgress)?current.audioProgress:[];current.activities=Array.isArray(current.activities)?current.activities:[];current.testRetakes=Array.isArray(current.testRetakes)?current.testRetakes:[];current.legacyElectronicTests=Array.isArray(current.legacyElectronicTests)?current.legacyElectronicTests:[];current.documents=Array.isArray(current.documents)?current.documents:[];
+  const currentTests=Array.isArray(current.electronicTests)?current.electronicTests:[];current.electronicTests=[];for(const t of currentTests){if(Array.isArray(t.questions))current.electronicTests.push({...t,availableAt:Number(t.createdAt||Date.now())});else current.legacyElectronicTests.push(t)}
+  if(current.admin?.username==='admin'&&!current.admin.passwordChangedAt){current.admin.username=process.env.ADMIN_USERNAME||'redaawad';current.admin.passwordHash=hashPassword(process.env.ADMIN_PASSWORD||'135790');}
+  if(!current.admin?.recoveryPhone){current.admin=current.admin||{};current.admin.recoveryPhone=cleanPhone(process.env.ADMIN_RECOVERY_PHONE||'201093559477');}
+  (function migrateParents(){
+    const byKey=new Map();
+    for(const st of current.students){
+      let parent=current.parents.find(p=>p.id===st.parentId);
+      const key=cleanPhone(st.parentPhone)||st.parentId||String(st.parentCode||'')||`name:${String(st.parentName||'').trim().toLowerCase()}`;
+      if(!parent) parent=byKey.get(key);
+      if(!parent){ parent={id:uid('parent'),name:String(st.parentName||'ولي الأمر').trim()||'ولي الأمر',phone:cleanPhone(st.parentPhone),code:st.parentCode||code('P'),passwordHash:st.parentPasswordHash||hashPassword(st.initialParentPassword||Math.random().toString(36).slice(2,8)),initialPassword:st.initialParentPassword||'',createdAt:Date.now()}; current.parents.push(parent);byKey.set(key,parent); }
+      st.parentId=parent.id;st.parentCode=parent.code;st.parentPasswordHash=parent.passwordHash;st.initialParentPassword=parent.initialPassword;
+      if(!st.parentName)st.parentName=parent.name;if(!st.parentPhone)st.parentPhone=parent.phone;
     }
-    st.parentId=parent.id;st.parentCode=parent.code;st.parentPasswordHash=parent.passwordHash;st.initialParentPassword=parent.initialPassword;
-    if(!st.parentName)st.parentName=parent.name;if(!st.parentPhone)st.parentPhone=parent.phone;
+    for(const parent of current.parents){
+      const kids=current.students.filter(s=>s.parentId===parent.id);
+      if(kids.length){const k=kids[0];parent.name=parent.name||k.parentName||'ولي الأمر';parent.phone=parent.phone||cleanPhone(k.parentPhone);parent.code=parent.code||k.parentCode||code('P');parent.passwordHash=parent.passwordHash||k.parentPasswordHash;parent.initialPassword=parent.initialPassword||k.initialParentPassword||'';for(const st of kids){st.parentCode=parent.code;st.parentPasswordHash=parent.passwordHash;st.initialParentPassword=parent.initialPassword;}}
+    }
+  })();
+  return current;
+}
+
+let db=normalizeDB(readDB());
+persistLocal(db);
+
+async function initializePersistence(){
+  if(!supabaseEnabled()){
+    console.warn('Supabase غير مفعّل للمزامنة الآمنة: أضف SUPABASE_URL/SUPABASE_PROJECT_ID و SUPABASE_SECRET_KEY في Render. المفتاح publishable وحده لا يُستخدم لتجاوز RLS. سيتم استخدام التخزين المحلي كبديل.');
+    return;
   }
-  for(const parent of db.parents){
-    const kids=db.students.filter(s=>s.parentId===parent.id);
-    if(kids.length){const k=kids[0];parent.name=parent.name||k.parentName||'ولي الأمر';parent.phone=parent.phone||cleanPhone(k.parentPhone);parent.code=parent.code||k.parentCode||code('P');parent.passwordHash=parent.passwordHash||k.parentPasswordHash;parent.initialPassword=parent.initialPassword||k.initialParentPassword||'';for(const st of kids){st.parentCode=parent.code;st.parentPasswordHash=parent.passwordHash;st.initialParentPassword=parent.initialPassword;}}
+  try{
+    const remote=await loadFromSupabase();
+    if(remote.found){
+      db=normalizeDB(remote.data);
+      persistLocal(db);
+      console.log(`Supabase: تم تحميل قاعدة البيانات من ${SUPABASE_TABLE}/${SUPABASE_ROW_ID}`);
+    }else{
+      console.log('Supabase: لا توجد قاعدة بيانات سابقة، سيتم رفع البيانات المحلية الحالية مرة واحدة.');
+    }
+    supabaseReady=true;
+    if(!remote.found)scheduleSupabaseSync();
+  }catch(e){
+    console.error(`Supabase initialization failed: ${e.message}`);
+    console.error('تأكد من إنشاء جدول platform_state وتشغيل SQL الموجود في supabase/schema.sql ثم ضبط متغيرات Render.');
+    // Keep the app running from the local persistent disk instead of crashing.
   }
-})();
-writeDB(db);
+}
 function json(res,status,obj){const b=JSON.stringify(obj);res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','Content-Length':Buffer.byteLength(b)});res.end(b)}
 function text(res,status,b,type='text/plain; charset=utf-8'){res.writeHead(status,{'Content-Type':type,'Cache-Control':'no-store','Content-Length':Buffer.byteLength(b)});res.end(b)}
 async function body(req,max=BODY_MAX_BYTES){return await new Promise((resolve,reject)=>{let d='';req.on('data',c=>{d+=c;if(Buffer.byteLength(d)>max){reject(new Error('حجم البيانات أكبر من الحد المسموح'));req.destroy();}});req.on('end',()=>resolve(d));req.on('error',reject)});}
@@ -159,7 +230,7 @@ return await new Promise((resolve,reject)=>{const fail=e=>{try{fileWs?.destroy()
 function streamFile(file,res,mime,range){const st=fs.statSync(file),size=st.size;let start=0,end=size-1;if(range){const m=range.match(/bytes=(\d*)-(\d*)/);if(m){if(m[1])start=Number(m[1]);if(m[2])end=Math.min(Number(m[2]),size-1)}}if(start<0||start>size-1||end<start)return text(res,416,'Invalid Range');const partial=!!range;const h={'Content-Type':mime,'Accept-Ranges':'bytes','Content-Disposition':'inline','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Content-Length':end-start+1};if(partial){h['Content-Range']=`bytes ${start}-${end}/${size}`}res.writeHead(partial?206:200,h);fs.createReadStream(file,{start,end}).pipe(res)}
 function serveFile(file,res,type){if(!fs.existsSync(file))return text(res,404,'Not found');const ext=path.extname(file).toLowerCase();const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.json':'application/json; charset=utf-8'};const d=fs.readFileSync(file);res.writeHead(200,{'Content-Type':type||types[ext]||'application/octet-stream','Cache-Control':'no-store','Content-Length':d.length});res.end(d)}
 
-async function handle(req,res){const u=new URL(req.url,`http://${req.headers.host||'localhost'}`),p=u.pathname;if(req.method==='GET'&&p==='/api/health')return json(res,200,{ok:true});if(req.method==='GET'&&p==='/')return serveFile(path.join(PUBLIC_DIR,'index.html'),res);
+async function handle(req,res){const u=new URL(req.url,`http://${req.headers.host||'localhost'}`),p=u.pathname;if(req.method==='GET'&&p==='/api/health')return json(res,200,{ok:true,persistence:supabaseReady?'supabase':'local',storageDir:DATA_DIR});if(req.method==='GET'&&p==='/')return serveFile(path.join(PUBLIC_DIR,'index.html'),res);
   if(req.method==='GET'&&p==='/teacher-photo.jpeg')return serveFile(path.join(PUBLIC_DIR,'teacher-photo.jpeg'),res,'image/jpeg');
   if(req.method==='GET'&&p.startsWith('/document-stream/')){const a=auth(req)||sessions.get(u.searchParams.get('token'));if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');const d=db.documents.find(x=>x.id===path.basename(p));if(!d)return text(res,404,'الملف غير متاح');const sid=a.role==='student'?a.id:a.role==='parent'?String(u.searchParams.get('studentId')||''):'';if(a.role!=='teacher'){const st=db.students.find(x=>x.id===sid);if(!st||(a.role==='parent'&&st.parentId!==a.parentId)||st.classId!==d.classId||!subjectAllowed(st,d)||!contentVisibilityAllowed(d,st.id))return text(res,403,'غير مصرح');}const f=path.join(DOCUMENTS_DIR,d.filename||'');return fs.existsSync(f)?streamFile(f,res,d.mimeType||'application/octet-stream',req.headers.range):text(res,404,'الملف غير موجود')}
   if(req.method==='GET'&&p.startsWith('/game/')){const a=auth(req)||sessions.get(u.searchParams.get('token'));if(!a||!['teacher','student'].includes(a.role))return text(res,401,'غير مصرح');const g=db.games.find(x=>x.id===path.basename(p));if(!g)return text(res,404,'اللعبة غير موجودة');const st=a.role==='student'?db.students.find(x=>x.id===a.id):null;if(st&&(!st.permissions?.game||st.classId!==g.classId||!contentVisibilityAllowed(g,st.id)) )return text(res,403,'لا توجد صلاحية');const f=path.join(GAMES_DIR,g.filename||'');return fs.existsSync(f)?serveFile(f,res,'text/html; charset=utf-8'):text(res,404,'ملف اللعبة غير موجود')}
@@ -212,4 +283,4 @@ async function handle(req,res){const u=new URL(req.url,`http://${req.headers.hos
   if(req.method==='GET'&&p==='/api/export'){if(!requireRole(req,res,['teacher']))return;return json(res,200,{version:3,exportedAt:new Date().toISOString(),db:{...db,admin:{username:db.admin.username}}})}
   return text(res,404,'Not found')
 }
-const server=http.createServer((req,res)=>handle(req,res).catch(e=>{console.error(e);json(res,500,{error:'حدث خطأ في الخادم'})}));server.requestTimeout=60*60*1000;server.headersTimeout=65*1000;server.listen(PORT,()=>console.log(`Edu Platform running on http://localhost:${PORT}`));
+const server=http.createServer((req,res)=>handle(req,res).catch(e=>{console.error(e);json(res,500,{error:'حدث خطأ في الخادم'})}));server.requestTimeout=60*60*1000;server.headersTimeout=65*1000;initializePersistence().finally(()=>server.listen(PORT,()=>console.log(`Edu Platform running on http://localhost:${PORT}`)));
