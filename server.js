@@ -251,7 +251,7 @@ async function handleGoogleDriveStream(item,res,req,kind){
     if(req.headers.range)headers.Range=req.headers.range;
     const r=await fetch(googleDriveDownloadUrl(source),{headers,redirect:'follow'});
     if(!r.ok)return text(res,r.status,r.status===404?'ملف Google Drive غير موجود أو غير متاح للعامة':'تعذر جلب ملف Google Drive');
-    const fallback={video:'video/mp4',audio:'audio/mpeg',document:item.mimeType||'application/pdf',game:'text/html'}[kind]||'application/octet-stream';
+    const fallback={video:'video/mp4',audio:'audio/mpeg',document:item.mimeType||'application/pdf',test:item.mimeType||'application/pdf',game:'text/html'}[kind]||'application/octet-stream';
     const out={'Content-Type':r.headers.get('content-type')||fallback,'Cache-Control':'private, no-store','Content-Disposition':'inline','X-Content-Type-Options':'nosniff'};
     for(const [from,to] of [['content-length','Content-Length'],['content-range','Content-Range'],['accept-ranges','Accept-Ranges']]){const v=r.headers.get(from);if(v)out[to]=v;}
     res.writeHead(r.status,out);
@@ -332,7 +332,7 @@ async function handle(req,res){const u=new URL(req.url,`http://${req.headers.hos
     const a=auth(req)||sessions.get(u.searchParams.get('token'));
     if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
     const parts=p.split('/').filter(Boolean),kind=parts[1],id=decodeURIComponent(parts[2]||'');
-    const map={video:'videos',audio:'audios',document:'documents',game:'games'};
+    const map={video:'videos',audio:'audios',document:'documents',game:'games',test:'electronicTests'};
     const item=db[map[kind]]?.find(x=>x.id===id);
     if(!item||item.sourceType!=='drive')return text(res,404,'ملف Google Drive غير متاح');
     const sid=a.role==='student'?a.id:a.role==='parent'?String(u.searchParams.get('studentId')||''):'';
@@ -347,7 +347,7 @@ async function handle(req,res){const u=new URL(req.url,`http://${req.headers.hos
     const a=auth(req)||sessions.get(u.searchParams.get('token'));
     if(!a||!['teacher','student','parent'].includes(a.role))return text(res,401,'غير مصرح');
     const parts=p.split('/').filter(Boolean),kind=parts[1],id=decodeURIComponent(parts[2]||'');
-    const map={video:'videos',audio:'audios',document:'documents',game:'games'};
+    const map={video:'videos',audio:'audios',document:'documents',game:'games',test:'electronicTests'};
     const item=db[map[kind]]?.find(x=>x.id===id);
     if(!item||item.sourceType!=='telegram'||!item.telegramFileId)return text(res,404,'ملف Telegram غير متاح');
     const sid=a.role==='student'?a.id:a.role==='parent'?String(u.searchParams.get('studentId')||''):'';
